@@ -363,12 +363,14 @@ def format_section_update_review_comment(report, commit_info=None, feature_secti
         comment_parts.append("")
 
     has_applied = bool(
-        report.applied_updates and any(u.status == "applied" for u in report.applied_updates)
+        report.applied_updates
+        and any(u.status in ("applied", "updated") for u in report.applied_updates)
     )
     has_rejected = bool(report.rejected_updates)
     has_review = bool(report.review_required_updates)
+    has_source_errors = bool(getattr(report, "source_analysis_errors", []))
 
-    if not has_applied and not has_rejected and not has_review:
+    if not has_applied and not has_rejected and not has_review and not has_source_errors:
         comment_parts.append(
             "\u2705 **No documentation updates needed** - all documentation sections are up to date with code changes!"
         )
@@ -376,8 +378,8 @@ def format_section_update_review_comment(report, commit_info=None, feature_secti
             comment_parts.append(feature_section)
         return "\n".join(comment_parts)
 
-    # 1. Applied Updates
-    applied = [u for u in report.applied_updates if u.status == "applied"]
+    # 1. Applied / Updated Updates
+    applied = [u for u in report.applied_updates if u.status in ("applied", "updated")]
     if applied:
         comment_parts.append(f"### \U0001f4c4 Documentation Updated ({len(applied)} section(s))")
         comment_parts.append("")
@@ -420,27 +422,75 @@ def format_section_update_review_comment(report, commit_info=None, feature_secti
             )
         comment_parts.append("")
 
-    # 4. Rejected Updates
+    # 4. Source Analysis Errors
+    if has_source_errors:
+        comment_parts.append(
+            f"### \u26a0\ufe0f Source Analysis Failures ({len(report.source_analysis_errors)} file(s))"
+        )
+        comment_parts.append("")
+        for src_f, err_msg in report.source_analysis_errors:
+            clean_err = sanitize_output(str(err_msg))
+            comment_parts.append(f"- \u26a0\ufe0f `{src_f}`: {clean_err}")
+        comment_parts.append("")
+
+    # 5. Rejected Updates (grouped by specific failure types)
     if has_rejected:
-        comment_parts.append(
-            f"### \u274c Rejected Updates ({len(report.rejected_updates)} item(s))"
-        )
-        comment_parts.append("")
-        comment_parts.append(
-            "The following proposed updates were rejected to prevent documentation errors or hallucination:"
-        )
-        comment_parts.append("")
-        for u in report.rejected_updates:
-            reasons = (
-                "; ".join(u.validation.failed_checks)
-                if u.validation.failed_checks
-                else u.explanation
-            )
-            clean_reason = sanitize_output(reasons)
+        tx_failed = [u for u in report.rejected_updates if u.status == "transaction_failed"]
+        gen_failed = [u for u in report.rejected_updates if u.status == "generation_failed"]
+        source_failed = [u for u in report.rejected_updates if u.status == "source_analysis_failed"]
+        std_rejected = [
+            u
+            for u in report.rejected_updates
+            if u.status not in ("transaction_failed", "generation_failed", "source_analysis_failed")
+        ]
+
+        if tx_failed:
+            comment_parts.append(f"### \U0001f6a8 Transaction Failures ({len(tx_failed)} item(s))")
+            comment_parts.append("")
+            for u in tx_failed:
+                comment_parts.append(
+                    f"- \U0001f6a8 `{u.doc_path}`: {sanitize_output(u.explanation)}"
+                )
+            comment_parts.append("")
+
+        if gen_failed:
+            comment_parts.append(f"### \U0001f4a5 Generation Failures ({len(gen_failed)} item(s))")
+            comment_parts.append("")
+            for u in gen_failed:
+                comment_parts.append(
+                    f"- \U0001f4a5 `{u.doc_path}` \u2192 Section `{u.section_heading}`: {sanitize_output(u.explanation)}"
+                )
+            comment_parts.append("")
+
+        if source_failed and not has_source_errors:
             comment_parts.append(
-                f"- \u274c `{u.doc_path}` \u2192 Section `{u.section_heading}`: {clean_reason}"
+                f"### \u26a0\ufe0f Source Analysis Failures ({len(source_failed)} item(s))"
             )
-        comment_parts.append("")
+            comment_parts.append("")
+            for u in source_failed:
+                comment_parts.append(
+                    f"- \u26a0\ufe0f `{u.doc_path}` \u2192 Section `{u.section_heading}`: {sanitize_output(u.explanation)}"
+                )
+            comment_parts.append("")
+
+        if std_rejected:
+            comment_parts.append(f"### \u274c Rejected Updates ({len(std_rejected)} item(s))")
+            comment_parts.append("")
+            comment_parts.append(
+                "The following proposed updates were rejected to prevent documentation errors or hallucination:"
+            )
+            comment_parts.append("")
+            for u in std_rejected:
+                reasons = (
+                    "; ".join(u.validation.failed_checks)
+                    if u.validation.failed_checks
+                    else u.explanation
+                )
+                clean_reason = sanitize_output(reasons)
+                comment_parts.append(
+                    f"- \u274c `{u.doc_path}` \u2192 Section `{u.section_heading}`: {clean_reason}"
+                )
+            comment_parts.append("")
 
     if feature_section:
         comment_parts.append(feature_section)

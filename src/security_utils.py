@@ -8,6 +8,7 @@ This module provides security functions to prevent:
 """
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -40,13 +41,114 @@ def sanitize_output(text, sensitive_tokens=None):
         if val:
             sensitive_tokens.append(val)
 
-    # Replace all sensitive tokens
+    # Dynamically scan os.environ for secret-like keys
+    sensitive_name_keywords = (
+        "KEY",
+        "SECRET",
+        "PASSWORD",
+        "TOKEN",
+        "AUTH",
+        "CREDENTIAL",
+        "PASS",
+    )
+    for k, v in os.environ.items():
+        if any(kw in k.upper() for kw in sensitive_name_keywords):
+            if v and len(v.strip()) >= 5 and v not in sensitive_tokens:
+                sensitive_tokens.append(v)
+
+    # Replace all sensitive tokens, longest first to avoid partial replacements
     sanitized = text
-    for token in sensitive_tokens:
+    for token in sorted(sensitive_tokens, key=len, reverse=True):
         if token and len(token) > 0:
             sanitized = sanitized.replace(token, "***TOKEN***")
 
     return sanitized
+
+
+def redact_secrets(text: str) -> str:
+    """
+    Redact secrets including AWS keys, GitHub PATs, JWTs, OpenAI keys, Slack tokens,
+    Stripe keys, database credentials, authorization headers, private key blocks,
+    and prefixed secret variable assignments.
+
+    Preserves code structure, variable names, and formatting for comprehension while
+    scrubbing the actual secret values.
+    """
+    if not text:
+        return text
+
+    # 1. AWS access key ID (e.g. AKIAIOSFODNN7EXAMPLE)
+    text = re.sub(r"\bAKIA[0-9A-Z]{16}\b", "[REDACTED_AWS_KEY]", text)
+
+    # 2. AWS secret access key in assignment
+    text = re.sub(
+        r"(?i)\b((?:aws_secret_access_key|aws_secret_key)\s*[:=]\s*['\"]?)[A-Za-z0-9/+=]{40}(['\"]?)",
+        r"\1[REDACTED_AWS_SECRET_KEY]\2",
+        text,
+    )
+
+    # 3. GitHub tokens (ghp_, github_pat_, gho_, ghu_, ghs_, ghr_)
+    text = re.sub(r"\bgh[pousr]_[0-9a-zA-Z]{36,255}\b", "[REDACTED_GITHUB_TOKEN]", text)
+    text = re.sub(r"\bgithub_pat_[0-9a-zA-Z_]{20,255}\b", "[REDACTED_GITHUB_TOKEN]", text)
+
+    # 4. JSON Web Tokens (JWT)
+    text = re.sub(
+        r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b",
+        "[REDACTED_JWT]",
+        text,
+    )
+
+    # 5. OpenAI-style API keys (sk-...)
+    text = re.sub(r"\bsk-[A-Za-z0-9_-]{20,}\b", "[REDACTED_OPENAI_KEY]", text)
+    text = re.sub(r"\bsk-proj-[A-Za-z0-9_-]{20,}\b", "[REDACTED_OPENAI_KEY]", text)
+
+    # 6. Slack tokens (xoxb-, xoxp-, xoxa-, xoxr-)
+    text = re.sub(r"\bxox[baprs]-[0-9a-zA-Z-]{10,}\b", "[REDACTED_SLACK_TOKEN]", text)
+
+    # 7. Stripe keys (sk_live_, rk_live_, sk_test_, rk_test_)
+    text = re.sub(r"\b[sr]k_(?:live|test)_[0-9a-zA-Z]{24,}\b", "[REDACTED_STRIPE_KEY]", text)
+
+    # 8. Database connection strings containing credentials
+    text = re.sub(
+        r"\b((?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|amqp|mssql):\/\/[^\s:@/]+:)[^\s:@/]+(@[^\s\"']+)\b",
+        r"\1[REDACTED_PASSWORD]\2",
+        text,
+    )
+
+    # 9. Authorization headers
+    text = re.sub(
+        r"(?i)\b(Authorization:\s*(?:Bearer|Basic)\s+)[A-Za-z0-9._~+/-]{10,}\b",
+        r"\1[REDACTED_TOKEN]",
+        text,
+    )
+    text = re.sub(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]{16,}\b", r"\1[REDACTED_TOKEN]", text)
+
+    # 10. Private key blocks
+    text = re.sub(
+        r"-----BEGIN [A-Z0-9_ -]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9_ -]*PRIVATE KEY-----",
+        "[REDACTED_PRIVATE_KEY]",
+        text,
+    )
+
+    # 11. Prefixed / variable-name secret assignments (e.g. MY_API_KEY, DB_PASSWORD, CLIENT_SECRET)
+    text = re.sub(
+        r"(?i)\b([A-Za-z0-9_]*(?:API_KEY|SECRET|PASSWORD|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|BEARER_TOKEN|CLIENT_SECRET)[A-Za-z0-9_]*\s*[:=]\s*['\"])[^'\"]+(['\"])",
+        r"\1[REDACTED]\2",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(['\"][A-Za-z0-9_]*(?:API_KEY|SECRET|PASSWORD|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|BEARER_TOKEN|CLIENT_SECRET)[A-Za-z0-9_]*['\"]\s*:\s*['\"])[^'\"]+(['\"])",
+        r"\1[REDACTED]\2",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(export\s+[A-Za-z0-9_]*(?:API_KEY|SECRET|PASSWORD|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|BEARER_TOKEN|CLIENT_SECRET)[A-Za-z0-9_]*=)[^\s;&\"']+\b",
+        r"\1[REDACTED]",
+        text,
+    )
+
+    # 12. Sanitize active environment variables
+    return sanitize_output(text)
 
 
 def run_command_safe(cmd, check=False, capture_output=True, **kwargs):

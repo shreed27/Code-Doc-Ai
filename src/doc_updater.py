@@ -38,11 +38,17 @@ from impact_mapper import (
     consolidate_impacts,
 )
 from section_patcher import ParsedDocument, parse_sections, replace_section_content
-from security_utils import sanitize_output
+from security_utils import redact_secrets
 
 # =============================================================================
 # DATA CONTRACTS
 # =============================================================================
+
+
+class ContextBudgetExceededError(Exception):
+    """Raised when target section and essential context exceed configured MAX_CONTEXT_CHARS."""
+
+    pass
 
 
 @dataclass
@@ -98,7 +104,7 @@ class AppliedSectionUpdate:
     doc_path: str
     section_id: str
     section_heading: str
-    status: str  # "applied", "rejected", "review_required", "no_change"
+    status: str  # "applied", "updated", "rejected", "review_required", "no_change", "source_analysis_failed", "generation_failed", "transaction_failed"
     original_section_content: str
     new_section_content: str
     explanation: str
@@ -114,6 +120,7 @@ class DocumentationUpdateReport:
     applied_updates: list[AppliedSectionUpdate] = field(default_factory=list)
     rejected_updates: list[AppliedSectionUpdate] = field(default_factory=list)
     review_required_updates: list[AppliedSectionUpdate] = field(default_factory=list)
+    source_analysis_errors: list[tuple[str, str]] = field(default_factory=list)
     total_sections_analyzed: int = 0
     total_sections_applied: int = 0
     total_sections_rejected: int = 0
@@ -127,7 +134,13 @@ class DocumentationUpdateReport:
 class DocumentTransactionError(Exception):
     """Raised when document staging, validation, or transaction commit fails."""
 
-    pass
+    def __init__(
+        self,
+        message: str,
+        unrecovered_backups: list[tuple[Path, Path]] | None = None,
+    ):
+        super().__init__(message)
+        self.unrecovered_backups = unrecovered_backups or []
 
 
 class UnsupportedDocumentExtensionError(DocumentTransactionError):
@@ -137,39 +150,60 @@ class UnsupportedDocumentExtensionError(DocumentTransactionError):
 
 
 class PathTraversalSecurityError(DocumentTransactionError):
-    """Raised when a destination path attempts traversal outside docs_root."""
+    """Raised when a destination path attempts traversal outside docs_root or follows an escaping symlink."""
 
     pass
 
 
 class DocumentTransaction:
     """
-    Manages multi-document updates with all-or-nothing transactional guarantees.
+    Manages multi-document updates with application-level transactional guarantees.
 
-    Staged temporary writes, permission preservation, and atomic rollback on failure.
+    Provides staged temporary writes, permission and metadata preservation,
+    and rollback on commit failure.
+
+    NOTE ON ATOMICITY LIMITATIONS:
+    This class provides in-process application-level rollback against Python exceptions,
+    OS errors, and BaseExceptions (e.g. KeyboardInterrupt). It does NOT guarantee durable
+    multi-file atomicity across catastrophic hardware power loss or uncatchable SIGKILL,
+    which would require an external write-ahead log (WAL) or filesystem-level snapshotting.
     """
 
     def __init__(self, docs_root: str | Path):
         self.docs_root = Path(docs_root).resolve()
-        self.staged_files: list[tuple[Path, Path, int | None, bool]] = []
-        # (dest_path, temp_staged_path, original_mode, originally_existed)
-        self.backups: list[tuple[Path, Path]] = []
-        # (dest_path, backup_path)
+        # Records: (dest_path, temp_staged_path, original_bytes, orig_mode, orig_times, existed)
+        self.staged_files: list[
+            tuple[Path, Path, bytes | None, int | None, tuple[float, float] | None, bool]
+        ] = []
+        # Records: (dest_path, backup_path, orig_mode, orig_times)
+        self.backups: list[tuple[Path, Path, int | None, tuple[float, float] | None]] = []
+        # Surviving backups from failed rollbacks that MUST NOT be deleted
+        self.unrecovered_backups: list[tuple[Path, Path]] = []
         self.committed = False
 
     def validate_destination_path(self, rel_path: str | Path) -> Path:
-        """Validate extension and prevent path traversal."""
+        """Validate extension, symlinks, and prevent path traversal."""
         path_str = str(rel_path).strip()
         lower = path_str.lower()
         if not (lower.endswith(".md") or lower.endswith(".markdown")):
             raise UnsupportedDocumentExtensionError(
                 f"Unsupported document extension: '{path_str}'. Only .md and .markdown are supported."
             )
+
         dest = (self.docs_root / path_str).resolve()
         if dest != self.docs_root and self.docs_root not in dest.parents:
             raise PathTraversalSecurityError(
                 f"Path traversal detected: '{rel_path}' resolves outside docs root '{self.docs_root}'."
             )
+
+        unresolved = self.docs_root / path_str
+        if unresolved.is_symlink():
+            target_resolved = unresolved.resolve()
+            if target_resolved != self.docs_root and self.docs_root not in target_resolved.parents:
+                raise PathTraversalSecurityError(
+                    f"Symlink traversal detected: '{rel_path}' links outside docs root to '{target_resolved}'."
+                )
+
         return dest
 
     def stage_updates(self, updates: dict[str, str]) -> None:
@@ -177,26 +211,36 @@ class DocumentTransaction:
         try:
             for rel_path, content in updates.items():
                 dest_path = self.validate_destination_path(rel_path)
-                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                except OSError as mkdir_err:
+                    raise DocumentTransactionError(
+                        f"Failed creating directory for '{rel_path}': {mkdir_err}"
+                    ) from mkdir_err
 
+                orig_bytes = None
                 orig_mode = None
+                orig_times = None
                 existed = dest_path.is_file()
                 if existed:
                     try:
-                        orig_mode = dest_path.stat().st_mode & 0o777
+                        orig_bytes = dest_path.read_bytes()
+                        stat_res = dest_path.stat()
+                        orig_mode = stat_res.st_mode & 0o777
+                        orig_times = (stat_res.st_atime, stat_res.st_mtime)
                     except OSError:
                         orig_mode = 0o644
                 else:
                     orig_mode = 0o644
 
-                # Create temp file in same directory
-                temp_fd, temp_path_str = tempfile.mkstemp(
-                    dir=dest_path.parent, prefix=".stage_doc_"
-                )
-                temp_path = Path(temp_path_str)
+                temp_path = None
                 try:
-                    with open(temp_fd, "w", encoding="utf-8") as f:
-                        f.write(content)
+                    temp_fd, temp_path_str = tempfile.mkstemp(
+                        dir=dest_path.parent, prefix=".stage_doc_"
+                    )
+                    temp_path = Path(temp_path_str)
+                    with os.fdopen(temp_fd, "wb") as f:
+                        f.write(content.encode("utf-8"))
                         f.flush()
                         os.fsync(f.fileno())
                     if orig_mode is not None:
@@ -205,13 +249,15 @@ class DocumentTransaction:
                         except OSError:
                             pass
                 except Exception as write_err:
-                    if temp_path.exists():
+                    if temp_path and temp_path.exists():
                         temp_path.unlink(missing_ok=True)
                     raise DocumentTransactionError(
-                        f"Failed writing staged document '{rel_path}': {write_err}"
+                        f"Failed staging document update for '{rel_path}': {write_err}"
                     ) from write_err
 
-                self.staged_files.append((dest_path, temp_path, orig_mode, existed))
+                self.staged_files.append(
+                    (dest_path, temp_path, orig_bytes, orig_mode, orig_times, existed)
+                )
         except Exception:
             self.cleanup()
             raise
@@ -221,20 +267,39 @@ class DocumentTransaction:
         if not self.staged_files:
             return
 
-        replaced_backups: list[tuple[Path, Path | None]] = []
+        replaced_records: list[
+            tuple[Path, Path | None, int | None, tuple[float, float] | None]
+        ] = []
         try:
-            for dest_path, temp_path, orig_mode, existed in self.staged_files:
+            for (
+                dest_path,
+                temp_path,
+                orig_bytes,
+                orig_mode,
+                orig_times,
+                existed,
+            ) in self.staged_files:
                 backup_path = None
-                if existed:
-                    bak_fd, bak_path_str = tempfile.mkstemp(
-                        dir=dest_path.parent, prefix=".bak_doc_"
-                    )
-                    backup_path = Path(bak_path_str)
-                    with open(dest_path, "rb") as src, open(bak_fd, "wb") as dst:
-                        dst.write(src.read())
-                        dst.flush()
-                        os.fsync(dst.fileno())
-                    self.backups.append((dest_path, backup_path))
+                if existed and orig_bytes is not None:
+                    try:
+                        bak_fd, bak_path_str = tempfile.mkstemp(
+                            dir=dest_path.parent, prefix=".bak_doc_"
+                        )
+                        backup_path = Path(bak_path_str)
+                        with os.fdopen(bak_fd, "wb") as dst:
+                            dst.write(orig_bytes)
+                            dst.flush()
+                            os.fsync(dst.fileno())
+                        if orig_mode is not None:
+                            try:
+                                os.chmod(backup_path, orig_mode)
+                            except OSError:
+                                pass
+                        self.backups.append((dest_path, backup_path, orig_mode, orig_times))
+                    except Exception as bak_err:
+                        raise DocumentTransactionError(
+                            f"Failed creating backup for '{dest_path}': {bak_err}"
+                        ) from bak_err
 
                 os.replace(temp_path, dest_path)
                 if orig_mode is not None:
@@ -242,36 +307,59 @@ class DocumentTransaction:
                         os.chmod(dest_path, orig_mode)
                     except OSError:
                         pass
-                replaced_backups.append((dest_path, backup_path))
+                replaced_records.append((dest_path, backup_path, orig_mode, orig_times))
 
             self.committed = True
-        except Exception as commit_err:
+        except (Exception, BaseException) as commit_err:
             # ROLLBACK EVERYTHING ALREADY REPLACED
-            for d_path, b_path in reversed(replaced_backups):
+            rollback_failures: list[tuple[Path, Path | None, str]] = []
+            for d_path, b_path, m_orig, t_orig in reversed(replaced_records):
                 try:
                     if b_path is not None and b_path.exists():
                         os.replace(b_path, d_path)
+                        if m_orig is not None:
+                            try:
+                                os.chmod(d_path, m_orig)
+                            except OSError:
+                                pass
+                        if t_orig is not None:
+                            try:
+                                os.utime(d_path, t_orig)
+                            except OSError:
+                                pass
                     elif b_path is None and d_path.exists():
                         d_path.unlink(missing_ok=True)
-                except OSError as rollback_err:
-                    print(f"Critical error during rollback: {rollback_err}")
-            self.cleanup()
-            raise DocumentTransactionError(
-                f"Transaction commit failed; rolled back all replaced documents: {commit_err}"
-            ) from commit_err
+                except (Exception, BaseException) as rb_err:
+                    if b_path is not None and b_path.exists():
+                        self.unrecovered_backups.append((d_path, b_path))
+                    rollback_failures.append((d_path, b_path, str(rb_err)))
+
+            if rollback_failures:
+                msg = (
+                    f"Transaction commit failed and rollback could NOT restore all files: {commit_err}. "
+                    f"Failures: {rollback_failures}. Retained backups for manual recovery: {self.unrecovered_backups}"
+                )
+                raise DocumentTransactionError(
+                    msg, unrecovered_backups=self.unrecovered_backups
+                ) from commit_err
+            else:
+                raise DocumentTransactionError(
+                    f"Transaction commit failed; rolled back all replaced documents successfully: {commit_err}"
+                ) from commit_err
         finally:
             self.cleanup()
 
     def cleanup(self) -> None:
-        """Clean up temporary staged files and backup files."""
-        for _dest, temp_path, _mode, _existed in self.staged_files:
+        """Clean up temporary staged files and backups, NEVER unlinking surviving backups from failed rollbacks."""
+        unrecovered_baks = {b for _d, b in self.unrecovered_backups}
+        for _dest, temp_path, _bytes, _mode, _times, _existed in self.staged_files:
             if temp_path.exists():
                 temp_path.unlink(missing_ok=True)
-        for _dest, backup_path in self.backups:
-            if backup_path.exists():
+        for _dest, backup_path, _mode, _times in self.backups:
+            if backup_path not in unrecovered_baks and backup_path.exists():
                 backup_path.unlink(missing_ok=True)
         self.staged_files.clear()
-        self.backups.clear()
+        self.backups = [(d, b, m, t) for d, b, m, t in self.backups if b in unrecovered_baks]
 
 
 def atomic_overwrite_file(
@@ -279,6 +367,7 @@ def atomic_overwrite_file(
 ) -> bool:
     """
     Atomically overwrite a single documentation file with validation and rollback.
+    Fails safely without falling back to unvalidated direct writes.
     """
     path = Path(file_path).resolve()
     root = Path(docs_root).resolve() if docs_root else path.parent
@@ -288,25 +377,9 @@ def atomic_overwrite_file(
         tx.stage_updates({str(rel_path): content})
         tx.commit()
         return True
-    except Exception:
-        # Fallback direct atomic replace if outside provided root
-        dir_path = path.parent
-        dir_path.mkdir(parents=True, exist_ok=True)
-        temp_fd = None
-        temp_path = None
-        try:
-            temp_fd, temp_path_str = tempfile.mkstemp(dir=dir_path, prefix=".tmp_doc_")
-            temp_path = Path(temp_path_str)
-            with open(temp_fd, "w", encoding="utf-8") as f:
-                f.write(content)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(temp_path, path)
-            return True
-        except Exception:
-            if temp_path and temp_path.exists():
-                temp_path.unlink(missing_ok=True)
-            return False
+    except Exception as e:
+        print(f"Error: atomic_overwrite_file failed for {path}: {e}")
+        return False
 
 
 # =============================================================================
@@ -314,36 +387,176 @@ def atomic_overwrite_file(
 # =============================================================================
 
 
-def redact_secrets(text: str) -> str:
+def values_are_equivalent(val1: str, val2: str) -> bool:
+    """Check if two values are semantically equivalent (bools, floats, ints, null)."""
+    s1 = str(val1).strip().strip("'\"")
+    s2 = str(val2).strip().strip("'\"")
+    if s1 == s2:
+        return True
+    # Boolean equivalence
+    if s1.lower() in ("true", "false") and s2.lower() in ("true", "false"):
+        return s1.lower() == s2.lower()
+    # None/null equivalence
+    if s1.lower() in ("none", "null") and s2.lower() in ("none", "null"):
+        return True
+    # Numeric equivalence (e.g. 30 and 30.0)
+    try:
+        f1 = float(s1)
+        f2 = float(s2)
+        return f1 == f2
+    except (ValueError, TypeError):
+        pass
+    return False
+
+
+def is_already_documented(current_content: str, req: SectionUpdateRequest) -> bool:
     """
-    Redact secrets including AWS keys, GitHub PATs, private keys, auth headers, and tokens.
+    Check if the current documentation section already accurately reflects
+    all technical facts introduced by the AST deltas.
+    Prevents repetitive rewrites from model wording variations (Priority 7, H4).
     """
-    if not text:
-        return text
-    # 1. AWS access key ID
-    text = re.sub(r"\bAKIA[0-9A-Z]{16}\b", "[REDACTED_AWS_KEY]", text)
-    # 2. GitHub PATs / tokens
-    text = re.sub(r"\bghp_[0-9a-zA-Z]{36}\b", "[REDACTED_GITHUB_TOKEN]", text)
-    text = re.sub(r"\bgithub_pat_[0-9a-zA-Z_]{82}\b", "[REDACTED_GITHUB_TOKEN]", text)
-    # 3. Private keys
-    text = re.sub(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
-        "[REDACTED_PRIVATE_KEY]",
-        text,
-    )
-    # 4. Bearer / Authorization headers
-    text = re.sub(
-        r"(?i)(Authorization:\s*Bearer\s+)[A-Za-z0-9._~+/-]+", r"\1[REDACTED_TOKEN]", text
-    )
-    text = re.sub(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/-]{16,}", r"\1[REDACTED_TOKEN]", text)
-    # 5. Common secret variable assignments
-    text = re.sub(
-        r"(?i)\b((?:api_key|secret|password|private_token|access_token)\s*[:=]\s*['\"])[^'\"]+(['\"])",
-        r"\1[REDACTED]\2",
-        text,
-    )
-    # 6. Apply sanitize_output for environment variables
-    return sanitize_output(text)
+    if not current_content:
+        return False
+
+    # 1. If any removed symbol is still mentioned in the current doc, it's not up to date
+    for delta in req.ast_deltas.values():
+        for sym in delta.removed_symbols:
+            short_name = sym.name.split(".")[-1]
+            if re.search(rf"\b{re.escape(short_name)}\b", current_content):
+                return False
+
+    has_deltas = False
+    # 2. Check added constants: their names and values must be documented
+    for delta in req.ast_deltas.values():
+        if (
+            delta.added_constants
+            or delta.modified_constants
+            or delta.added_symbols
+            or delta.added_parameters
+            or delta.modified_parameters
+        ):
+            has_deltas = True
+
+        for c in delta.added_constants:
+            short_name = c.name.split(".")[-1]
+            if not re.search(rf"\b{re.escape(short_name)}\b", current_content):
+                return False
+            if c.value is not None:
+                val_str = c.value.strip().strip("'\"")
+                if val_str and not re.search(rf"\b{re.escape(val_str)}\b", current_content):
+                    return False
+
+        # Modified constants: new value must be present
+        for _old_c, new_c in delta.modified_constants:
+            short_name = new_c.name.split(".")[-1]
+            if not re.search(rf"\b{re.escape(short_name)}\b", current_content):
+                return False
+            if new_c.value is not None:
+                val_str = new_c.value.strip().strip("'\"")
+                if val_str and not re.search(rf"\b{re.escape(val_str)}\b", current_content):
+                    return False
+
+        # Added symbols
+        for sym in delta.added_symbols:
+            short_name = sym.name.split(".")[-1]
+            if not re.search(rf"\b{re.escape(short_name)}\b", current_content):
+                return False
+
+        # Added parameters
+        for _fname, p in delta.added_parameters:
+            if not re.search(rf"\b{re.escape(p.name)}\b", current_content):
+                return False
+            if p.default_value is not None:
+                def_str = p.default_value.strip().strip("'\"")
+                if def_str and not re.search(rf"\b{re.escape(def_str)}\b", current_content):
+                    return False
+
+        # Modified parameters
+        for _fname, _old_p, new_p in delta.modified_parameters:
+            if not re.search(rf"\b{re.escape(new_p.name)}\b", current_content):
+                return False
+            if new_p.default_value is not None:
+                def_str = new_p.default_value.strip().strip("'\"")
+                if def_str and not re.search(rf"\b{re.escape(def_str)}\b", current_content):
+                    return False
+
+    return has_deltas
+
+
+def extract_relevant_code_snippet(
+    source_code: str,
+    changed_symbols: list[str],
+    max_chars: int,
+) -> str:
+    """
+    Extract a targeted code window around the changed symbols, plus relevant
+    top-of-file imports and constants, rather than naively slicing from line 0.
+    """
+    if not source_code or len(source_code) <= max_chars:
+        return source_code
+
+    lines = source_code.splitlines(keepends=True)
+    total_lines = len(lines)
+
+    # 1. Grab top-of-file imports and constants (up to 30 lines)
+    header_lines: list[str] = []
+    header_chars = 0
+    for i in range(min(30, total_lines)):
+        line = lines[i]
+        if line.startswith(("import ", "from ", "#")) or re.match(r"^[A-Z0-9_]+\s*=", line):
+            header_lines.append(line)
+            header_chars += len(line)
+
+    remaining_chars = max(300, max_chars - header_chars - 100)
+
+    # 2. Locate changed symbols using AST or regex
+    symbol_line_ranges: list[tuple[int, int]] = []
+    try:
+        tree = ast.parse(source_code)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                if node.name in changed_symbols or any(
+                    cs.endswith(f".{node.name}") for cs in changed_symbols
+                ):
+                    start = getattr(node, "lineno", 1) - 1
+                    end = getattr(node, "end_lineno", start + 20)
+                    symbol_line_ranges.append((start, end))
+    except Exception:
+        pass
+
+    if not symbol_line_ranges:
+        for idx, line in enumerate(lines):
+            for sym in changed_symbols:
+                short = sym.split(".")[-1]
+                if short in line:
+                    symbol_line_ranges.append((max(0, idx - 5), min(total_lines, idx + 25)))
+                    break
+
+    if not symbol_line_ranges:
+        symbol_line_ranges = [(max(0, total_lines - 40), total_lines)]
+
+    # Collect lines around the symbols
+    selected_indices: set[int] = set()
+    for s_start, s_end in symbol_line_ranges:
+        for idx in range(max(0, s_start - 3), min(total_lines, s_end + 3)):
+            selected_indices.add(idx)
+
+    snippet_lines = []
+    if header_lines:
+        snippet_lines.extend(header_lines)
+        snippet_lines.append("\n# ... [code omitted for context budget] ...\n\n")
+
+    sorted_indices = sorted(selected_indices)
+    curr_len = sum(len(line_item) for line_item in snippet_lines)
+    for idx in sorted_indices:
+        line_str = lines[idx]
+        if curr_len + len(line_str) > remaining_chars:
+            snippet_lines.append("# ... [truncated for context budget] ...\n")
+            break
+        snippet_lines.append(line_str)
+        curr_len += len(line_str)
+
+    return "".join(snippet_lines)
 
 
 _SYSTEM_PROMPT = """You are an expert technical documentation assistant.
@@ -375,7 +588,9 @@ def build_update_prompt(req: SectionUpdateRequest, max_context_chars: int | None
     Construct an evidence-rich prompt for the AI documentation generator.
 
     Applies clear untrusted boundary delimiters, secret redaction,
-    and prioritizes the target section so it is never truncated away.
+    strictly enforces the context budget across the entire model request
+    (including system prompt), and prioritizes the target section and
+    exact changed symbol snippets so essential context is never lost.
     """
     if max_context_chars is None:
         try:
@@ -385,7 +600,29 @@ def build_update_prompt(req: SectionUpdateRequest, max_context_chars: int | None
         except Exception:
             max_context_chars = 400000
 
-    # 1. High priority: Header and metadata
+    system_len = len(_SYSTEM_PROMPT)
+    max_user_prompt_chars = max_context_chars - system_len
+    if max_user_prompt_chars <= 500:
+        raise ContextBudgetExceededError(
+            f"Configured MAX_CONTEXT_CHARS ({max_context_chars}) is too small to fit system instructions."
+        )
+
+    # 1. Critical: Target Section Content (MUST NOT BE TRUNCATED)
+    safe_current_content = redact_secrets(req.current_section_content)
+    target_sec_text = (
+        f"\n### Current Section Content:\n"
+        f'<untrusted_current_documentation path="{req.doc_path}" section="{req.section_id}">\n'
+        f"{safe_current_content}\n"
+        f"</untrusted_current_documentation>\n"
+    )
+
+    # Check if target section alone exceeds budget
+    if len(target_sec_text) + 500 > max_user_prompt_chars:
+        raise ContextBudgetExceededError(
+            f"Target section content ({len(safe_current_content):,} chars) exceeds context budget ({max_context_chars:,} chars)."
+        )
+
+    # 2. Header and metadata
     header_parts = [
         f"### Target Section: {req.section_heading} (`{req.section_id}`)",
         f"**Document**: `{req.doc_path}`",
@@ -402,47 +639,76 @@ def build_update_prompt(req: SectionUpdateRequest, max_context_chars: int | None
         safe_ctx = redact_secrets(ev.context)
         header_parts.append(f'- [{ev.evidence_type}] `{ev.matched_text}`: "{safe_ctx}"')
 
-    # 2. Critical: Target Section Content (MUST NOT BE TRUNCATED)
-    safe_current_content = redact_secrets(req.current_section_content)
-    target_sec_text = (
-        f"\n### Current Section Content:\n"
-        f'<untrusted_current_documentation path="{req.doc_path}" section="{req.section_id}">\n'
-        f"{safe_current_content}\n"
-        f"</untrusted_current_documentation>\n"
-    )
+    header_text = "\n".join(header_parts)
 
+    fixed_len = len(header_text) + len(target_sec_text) + 200
+    available_for_other = max_user_prompt_chars - fixed_len
+    if available_for_other < 200:
+        raise ContextBudgetExceededError(
+            "Essential metadata and target section leave insufficient context for code evidence."
+        )
+
+    # 3. Style guidelines: allocate at most 15% of remaining budget
     style_text = ""
     if req.style_guidelines:
-        style_text = f"\n### Style Guidelines:\n{redact_secrets(req.style_guidelines)}\n"
+        clean_style = redact_secrets(req.style_guidelines).strip()
+        max_style_len = max(200, int(available_for_other * 0.15))
+        if len(clean_style) > max_style_len:
+            clean_style = clean_style[:max_style_len] + "\n# [TRUNCATED STYLE GUIDELINES]"
+        style_text = f"\n### Style Guidelines:\n{clean_style}\n"
 
-    base_len = sum(len(p) for p in header_parts) + len(target_sec_text) + len(style_text) + 200
-    available_for_code = max_context_chars - base_len
-    if available_for_code < 1000:
-        available_for_code = 1000
+    available_for_code = max(100, available_for_other - len(style_text))
 
-    # 3. Code changes within available budget
-    code_parts = ["\n### Code Changes:"]
-    budget_per_file = max(500, available_for_code // max(1, len(req.source_files)))
+    # 4. Code changes: prioritize relevant source files and targeted symbol snippets
+    # Filter to source files that contain changed symbols or impact evidence
+    relevant_files = []
     for src in req.source_files:
-        old_snip = redact_secrets(req.old_code_snippets.get(src, "").strip())
-        new_snip = redact_secrets(req.new_code_snippets.get(src, "").strip())
+        old_snip = req.old_code_snippets.get(src, "")
+        new_snip = req.new_code_snippets.get(src, "")
+        is_relevant = any(sym in old_snip or sym in new_snip for sym in req.changed_symbols) or any(
+            ev.matched_text in old_snip or ev.matched_text in new_snip for ev in req.impact_evidence
+        )
+        if is_relevant:
+            relevant_files.append(src)
+
+    if not relevant_files:
+        relevant_files = req.source_files[:10]  # Fallback to first few files
+
+    code_parts = ["\n### Code Changes:"]
+    budget_per_file = max(300, (available_for_code - 100) // max(1, len(relevant_files)))
+    for src in relevant_files:
+        raw_old = req.old_code_snippets.get(src, "").strip()
+        raw_new = req.new_code_snippets.get(src, "").strip()
+
+        old_snip = extract_relevant_code_snippet(raw_old, req.changed_symbols, budget_per_file // 2)
+        new_snip = extract_relevant_code_snippet(raw_new, req.changed_symbols, budget_per_file // 2)
+
+        old_snip = redact_secrets(old_snip)
+        new_snip = redact_secrets(new_snip)
+
         code_parts.append(f"#### File: `{src}`")
         if old_snip:
-            if len(old_snip) > budget_per_file:
-                old_snip = old_snip[:budget_per_file] + "\n# [TRUNCATED FOR LENGTH]"
             code_parts.append(
                 f'<untrusted_source_code file="{src}" version="previous">\n{old_snip}\n</untrusted_source_code>'
             )
         if new_snip:
-            if len(new_snip) > budget_per_file:
-                new_snip = new_snip[:budget_per_file] + "\n# [TRUNCATED FOR LENGTH]"
             code_parts.append(
                 f'<untrusted_source_code file="{src}" version="updated">\n{new_snip}\n</untrusted_source_code>'
             )
 
-    full_prompt = (
-        "\n".join(header_parts) + "\n" + "\n".join(code_parts) + "\n" + target_sec_text + style_text
-    )
+    code_text = "\n".join(code_parts)
+
+    full_prompt = f"{header_text}\n{code_text}\n{target_sec_text}{style_text}"
+
+    # Strict final enforcement of total outbound length
+    total_len = system_len + len(full_prompt)
+    if total_len > max_context_chars:
+        # Trim code_text from the end if needed
+        excess = total_len - max_context_chars
+        if len(code_text) > excess + 100:
+            code_text = code_text[: len(code_text) - excess - 50] + "\n# [TRUNCATED CODE EVIDENCE]"
+            full_prompt = f"{header_text}\n{code_text}\n{target_sec_text}{style_text}"
+
     return full_prompt
 
 
@@ -842,29 +1108,30 @@ class DocumentationValidator:
                     f"unsupported_option_or_parameter: option or parameter '{opt}' does not exist in source code"
                 )
 
-        # 9. Parameter Default Value & Type Verification (C1 Case 1)
+        # 9. Parameter Default Value & Type Verification (C1 Case 1 & Priority 2)
         for p_name, p_info in valid_params.items():
             if p_info.default_value is not None:
                 actual_val = p_info.default_value.strip().strip("'\"")
 
                 eq_matches = re.findall(
-                    rf"\b{re.escape(p_name)}\s*=\s*([0-9a-zA-Z_'\"]+)", clean_prop
+                    rf"\b{re.escape(p_name)}\s*=\s*`?([0-9]+(?:\.[0-9]+)?|[a-zA-Z_][0-9a-zA-Z_]*)`?",
+                    clean_prop,
                 )
                 for claimed in eq_matches:
-                    clean_claimed = claimed.strip().strip("'\"")
-                    if clean_claimed != actual_val and clean_claimed != "":
+                    clean_claimed = claimed.strip().rstrip(".").strip("'\"")
+                    if clean_claimed != "" and not values_are_equivalent(clean_claimed, actual_val):
                         failed.append(
                             f"parameter_default_mismatch: parameter '{p_name}' default is '{actual_val}', but documentation claims '{clean_claimed}'"
                         )
 
                 def_matches = re.findall(
-                    rf"\b{re.escape(p_name)}\b[^\.\n]*?default\s*(?:is|=|to|:)?\s*`?([0-9a-zA-Z_'\"]+)`?",
+                    rf"\b{re.escape(p_name)}\b[^\.\n]*?(?:defaults?\s*(?:is|=|to|:)|default:|\(default\s+)\s*`?([0-9]+(?:\.[0-9]+)?|[a-zA-Z_][0-9a-zA-Z_]*)`?",
                     clean_prop,
                     re.IGNORECASE,
                 )
                 for claimed in def_matches:
-                    clean_claimed = claimed.strip().strip("'\"")
-                    if clean_claimed != actual_val and clean_claimed != "":
+                    clean_claimed = claimed.strip().rstrip(".").strip("'\"")
+                    if clean_claimed != "" and not values_are_equivalent(clean_claimed, actual_val):
                         failed.append(
                             f"parameter_default_mismatch: parameter '{p_name}' default is '{actual_val}', but documentation claims '{clean_claimed}'"
                         )
@@ -894,7 +1161,114 @@ class DocumentationValidator:
                             f"parameter_type_mismatch: parameter '{p_name}' type is '{actual_type}', but documentation claims '{c_type}'"
                         )
 
-        # 10. Numeric Claims and Limits Verification (C1 Case 4)
+        # 9b. Constant Value Verification (Priority 2)
+        for c_name, c_info in valid_constants.items():
+            if c_info.value is not None:
+                actual_val = c_info.value.strip().strip("'\"")
+                c_matches = re.findall(
+                    rf"\b{re.escape(c_name)}\s*=\s*([0-9a-zA-Z_.'\"]+)", clean_prop
+                )
+                c_matches += re.findall(
+                    rf"\b{re.escape(c_name)}\b[^\.\n]*?(?:default\s*)?(?:is|=|to|:)\s*`?([0-9a-zA-Z_.'\"]+)`?",
+                    clean_prop,
+                    re.IGNORECASE,
+                )
+                for claimed in c_matches:
+                    clean_claimed = claimed.strip().strip("'\"")
+                    if clean_claimed != "" and not values_are_equivalent(clean_claimed, actual_val):
+                        failed.append(
+                            f"constant_value_mismatch: constant '{c_name}' value is '{actual_val}', but documentation claims '{clean_claimed}'"
+                        )
+
+        # 10. Numeric Claims and Limits Verification (C1 Case 4 & Priority 2)
+        # Specific entity-tied checks:
+        retry_claims = re.findall(
+            r"\b(?:retries|max_retries)\b[^\.\n]*?(?:of|is|=|:)\s*`?([0-9]+(?:\.[0-9]+)?)`?",
+            clean_prop,
+            re.IGNORECASE,
+        )
+        for r_val in retry_claims:
+            matching_entity = False
+            for p_name, p_info in valid_params.items():
+                if (
+                    "retr" in p_name.lower()
+                    and p_info.default_value
+                    and values_are_equivalent(r_val, p_info.default_value)
+                ):
+                    matching_entity = True
+                    break
+            if not matching_entity:
+                for c_name, c_info in valid_constants.items():
+                    if (
+                        "retr" in c_name.lower()
+                        and c_info.value
+                        and values_are_equivalent(r_val, c_info.value)
+                    ):
+                        matching_entity = True
+                        break
+            if not matching_entity:
+                failed.append(
+                    f"unsupported_numeric_claim: retries value '{r_val}' does not match retry constants or parameters"
+                )
+
+        timeout_claims = re.findall(
+            r"\btimeout\b[^\.\n]*?(?:of|is|=|:)\s*`?([0-9]+(?:\.[0-9]+)?)`?",
+            clean_prop,
+            re.IGNORECASE,
+        )
+        for t_val in timeout_claims:
+            matching_entity = False
+            for p_name, p_info in valid_params.items():
+                if (
+                    "timeout" in p_name.lower()
+                    and p_info.default_value
+                    and values_are_equivalent(t_val, p_info.default_value)
+                ):
+                    matching_entity = True
+                    break
+            if not matching_entity:
+                for c_name, c_info in valid_constants.items():
+                    if (
+                        "timeout" in c_name.lower()
+                        and c_info.value
+                        and values_are_equivalent(t_val, c_info.value)
+                    ):
+                        matching_entity = True
+                        break
+            if not matching_entity:
+                failed.append(
+                    f"unsupported_numeric_claim: timeout value '{t_val}' does not match timeout constants or parameters"
+                )
+        # Entity-tied evidence: limits, timeouts, retries, and rates must match exact parameters or constants.
+        valid_numeric_values: set[str] = set()
+        for p_info in valid_params.values():
+            if p_info.default_value is not None:
+                v = p_info.default_value.strip().strip("'\"")
+                valid_numeric_values.add(v)
+                try:
+                    valid_numeric_values.add(str(int(float(v))))
+                except (ValueError, TypeError):
+                    pass
+        for c_info in valid_constants.values():
+            if c_info.value is not None:
+                v = c_info.value.strip().strip("'\"")
+                valid_numeric_values.add(v)
+                try:
+                    valid_numeric_values.add(str(int(float(v))))
+                except (ValueError, TypeError):
+                    pass
+
+        # Also add numbers explicitly defined in AST deltas for changed symbols
+        for d in req.ast_deltas.values():
+            for c in d.added_constants + [nc for _oc, nc in d.modified_constants]:
+                if c.value:
+                    v = c.value.strip().strip("'\"")
+                    valid_numeric_values.add(v)
+                    try:
+                        valid_numeric_values.add(str(int(float(v))))
+                    except (ValueError, TypeError):
+                        pass
+
         num_claims = re.findall(
             r"(?:rate\s*limit(?:ed)?(?:\s*to)?|timeout\s*(?:of|is|=|:)?|default\s*(?:of|is|=|:)?|retries\s*(?:of|is|=|:)?|limit(?:ed)?(?:\s*to)?)\s*`?([0-9]+(?:\.[0-9]+)?)\b`?",
             clean_prop,
@@ -905,15 +1279,12 @@ class DocumentationValidator:
             clean_prop,
             re.IGNORECASE,
         )
-        orig_numbers = set(re.findall(r"\b[0-9]+\b", clean_orig))
+
         for num_str in num_claims:
-            if (
-                num_str not in fact_extractor.numeric_literals
-                and num_str not in fact_extractor.constants.values()
-                and num_str not in orig_numbers
-            ):
+            is_valid_num = any(values_are_equivalent(num_str, vn) for vn in valid_numeric_values)
+            if not is_valid_num:
                 failed.append(
-                    f"unsupported_numeric_claim: numeric value '{num_str}' is claimed in documentation but does not exist in source constants or literals"
+                    f"unsupported_numeric_claim: numeric value '{num_str}' is claimed in documentation but does not exist in relevant source constants, parameters, or limits"
                 )
 
         # 11. Return Type Verification (C1 Case 5)
@@ -1085,11 +1456,12 @@ class DocumentationUpdater:
             delta = compute_ast_delta(old_src, new_src, file_path=src_path)
             deltas[src_path] = delta
             if delta.syntax_error:
+                report.source_analysis_errors.append((src_path, delta.syntax_error))
                 applied_rec = AppliedSectionUpdate(
                     doc_path=src_path,
                     section_id="syntax_error",
                     section_heading="Syntax Error",
-                    status="rejected",
+                    status="source_analysis_failed",
                     original_section_content="",
                     new_section_content="",
                     explanation=f"Syntax error in source file {src_path}: {delta.syntax_error}",
@@ -1225,12 +1597,29 @@ class DocumentationUpdater:
                 user_prompt = build_update_prompt(req)
                 raw_ai_out = self.ai_generator(_SYSTEM_PROMPT, user_prompt)
                 ai_resp = parse_ai_response(raw_ai_out, doc_path, target.section_id)
+            except ContextBudgetExceededError as budget_err:
+                applied_rec = AppliedSectionUpdate(
+                    doc_path=doc_path,
+                    section_id=target.section_id,
+                    section_heading=target.section_heading,
+                    status="review_required",
+                    original_section_content=current_section_content,
+                    new_section_content="",
+                    explanation=f"Context budget exceeded: {budget_err}",
+                    validation=ValidationResult(
+                        is_valid=False,
+                        requires_human_review=True,
+                        review_reasons=[f"Context budget exceeded: {budget_err}"],
+                    ),
+                )
+                report.review_required_updates.append(applied_rec)
+                continue
             except Exception as gen_err:
                 applied_rec = AppliedSectionUpdate(
                     doc_path=doc_path,
                     section_id=target.section_id,
                     section_heading=target.section_heading,
-                    status="rejected",
+                    status="generation_failed",
                     original_section_content=current_section_content,
                     new_section_content="",
                     explanation=f"AI generation failed: {gen_err}",
@@ -1246,8 +1635,12 @@ class DocumentationUpdater:
             # 5. Deterministic Validation
             val_result = DocumentationValidator.validate(req, ai_resp, parsed_doc)
 
-            # Idempotency / No-Change Check (Priority 5 & Priority 6, H4)
-            if ai_resp.proposed_content.strip() == current_section_content.strip():
+            # Idempotency / No-Change Check (Priority 5 & Priority 6, H4, Priority 7)
+            already_documented = is_already_documented(current_section_content, req)
+            if (
+                ai_resp.proposed_content.strip() == current_section_content.strip()
+                or already_documented
+            ):
                 if active_removed_in_orig:
                     # Stale removed symbol remains in unchanged doc! (C3)
                     applied_rec = AppliedSectionUpdate(
@@ -1275,8 +1668,8 @@ class DocumentationUpdater:
                     section_heading=target.section_heading,
                     status="no_change",
                     original_section_content=current_section_content,
-                    new_section_content=ai_resp.proposed_content,
-                    explanation="Section content already up to date.",
+                    new_section_content=current_section_content,
+                    explanation="Section content already factually reflects code changes.",
                     validation=val_result,
                 )
                 report.applied_updates.append(applied_rec)
@@ -1337,9 +1730,17 @@ class DocumentationUpdater:
                 )
             )
 
-        # 6. Multi-Document All-or-Nothing Commit (Priority 3, N3)
-        # If any section in the run was rejected, abort the whole run!
-        if report.total_sections_rejected > 0:
+        # 6. Multi-Document All-or-Nothing Commit (Priority 3, N3, Priority 5)
+        # If any generated section in the run was rejected by validation, abort the run!
+        # Unrelated source analysis failures do NOT abort valid documentation updates for other files (Priority 5, M3).
+        has_validation_rejection = any(
+            u.status == "rejected"
+            and not any("syntax_error" in f for f in u.validation.failed_checks)
+            for u in report.rejected_updates
+        )
+        if has_validation_rejection or (
+            report.total_sections_rejected > 0 and not pending_section_patches
+        ):
             report.total_sections_applied = 0
             report.applied_updates = [u for u in report.applied_updates if u.status == "no_change"]
             report.updated_documents = dict(documents)

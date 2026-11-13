@@ -43,7 +43,12 @@ def git_repo(tmp_path, monkeypatch):
     run_command_safe(["git", "config", "user.name", "Test User"], cwd=str(repo), check=True)
     run_command_safe(["git", "config", "user.email", "test@example.com"], cwd=str(repo), check=True)
     run_command_safe(
-        ["git", "config", "remote.origin.url", "https://github.com/shreed27/Code-Doc-Ai.git"],
+        [
+            "git",
+            "config",
+            "remote.origin.url",
+            "https://github.com/shreed27/Code-Doc-Ai.git",
+        ],
         cwd=str(repo),
         check=True,
     )
@@ -56,7 +61,9 @@ def git_repo(tmp_path, monkeypatch):
 
     # Create local tracking ref origin/main so git commands referencing origin/main succeed
     run_command_safe(
-        ["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=str(repo), check=True
+        ["git", "update-ref", "refs/remotes/origin/main", "main"],
+        cwd=str(repo),
+        check=True,
     )
 
     monkeypatch.chdir(repo)
@@ -91,7 +98,9 @@ class TestProductIntegrationScenarios:
             ["git", "commit", "-m", "Add calculator and doc"], cwd=str(repo), check=True
         )
         run_command_safe(
-            ["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=str(repo), check=True
+            ["git", "update-ref", "refs/remotes/origin/main", "main"],
+            cwd=str(repo),
+            check=True,
         )
 
         # Create branch and make code change
@@ -102,7 +111,9 @@ class TestProductIntegrationScenarios:
         )
         run_command_safe(["git", "add", "src/calculator.py"], cwd=str(repo), check=True)
         run_command_safe(
-            ["git", "commit", "-m", "Add round_result parameter"], cwd=str(repo), check=True
+            ["git", "commit", "-m", "Add round_result parameter"],
+            cwd=str(repo),
+            check=True,
         )
 
         monkeypatch.setenv("DOCS_SUBFOLDER", "docs")
@@ -115,12 +126,19 @@ class TestProductIntegrationScenarios:
             "requires_human_review": False,
         }
 
-        with patch("suggest_docs.find_relevant_files_optimized", return_value=["api.md"]), patch(
-            "suggest_docs._resolve_pr_push_target",
-            return_value=("feat/round-calc", "https://github.com/shreed27/Code-Doc-Ai.git", False),
-        ), patch("suggest_docs.checkout_docs_from_base_branch"), patch(
-            "suggest_docs.run_command_safe"
-        ) as mock_run:
+        with (
+            patch("suggest_docs.find_relevant_files_optimized", return_value=["api.md"]),
+            patch(
+                "suggest_docs._resolve_pr_push_target",
+                return_value=(
+                    "feat/round-calc",
+                    "https://github.com/shreed27/Code-Doc-Ai.git",
+                    False,
+                ),
+            ),
+            patch("suggest_docs.checkout_docs_from_base_branch"),
+            patch("suggest_docs.run_command_safe") as mock_run,
+        ):
 
             def side_effect(cmd, *args, **kwargs):
                 if cmd[:2] == ["git", "push"]:
@@ -141,7 +159,10 @@ class TestProductIntegrationScenarios:
 
         # Git commit was created
         log_res = subprocess.run(
-            ["git", "log", "-n", "1", "--oneline"], cwd=str(repo), capture_output=True, text=True
+            ["git", "log", "-n", "1", "--oneline"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
         )
         assert "docs: update documentation" in log_res.stdout
 
@@ -161,12 +182,15 @@ class TestProductIntegrationScenarios:
         run_command_safe(["git", "add", "."], cwd=str(repo), check=True)
         run_command_safe(["git", "commit", "-m", "Add auth and doc"], cwd=str(repo), check=True)
         run_command_safe(
-            ["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=str(repo), check=True
+            ["git", "update-ref", "refs/remotes/origin/main", "main"],
+            cwd=str(repo),
+            check=True,
         )
 
         run_command_safe(["git", "checkout", "-b", "feat/auth-timeout"], cwd=str(repo), check=True)
         py_file.write_text(
-            "def login(user: str, timeout: int = 30) -> bool:\n    return True\n", encoding="utf-8"
+            "def login(user: str, timeout: int = 30) -> bool:\n    return True\n",
+            encoding="utf-8",
         )
         run_command_safe(["git", "add", "service/auth.py"], cwd=str(repo), check=True)
         run_command_safe(["git", "commit", "-m", "Add timeout"], cwd=str(repo), check=True)
@@ -181,16 +205,19 @@ class TestProductIntegrationScenarios:
             "requires_human_review": False,
         }
 
-        with patch("suggest_docs.find_relevant_files_optimized", return_value=["auth.md"]), patch(
-            "suggest_docs._resolve_pr_push_target",
-            return_value=(
-                "feat/auth-timeout",
-                "https://github.com/shreed27/Code-Doc-Ai.git",
-                False,
+        with (
+            patch("suggest_docs.find_relevant_files_optimized", return_value=["auth.md"]),
+            patch(
+                "suggest_docs._resolve_pr_push_target",
+                return_value=(
+                    "feat/auth-timeout",
+                    "https://github.com/shreed27/Code-Doc-Ai.git",
+                    False,
+                ),
             ),
-        ), patch("suggest_docs.checkout_docs_from_base_branch"), patch(
-            "suggest_docs.run_command_safe"
-        ) as mock_run:
+            patch("suggest_docs.checkout_docs_from_base_branch"),
+            patch("suggest_docs.run_command_safe") as mock_run,
+        ):
 
             def side_effect(cmd, *args, **kwargs):
                 if cmd[:2] == ["git", "push"]:
@@ -218,7 +245,9 @@ class TestProductIntegrationScenarios:
         run_command_safe(["git", "add", "."], cwd=str(repo), check=True)
         run_command_safe(["git", "commit", "-m", "Add api"], cwd=str(repo), check=True)
         run_command_safe(
-            ["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=str(repo), check=True
+            ["git", "update-ref", "refs/remotes/origin/main", "main"],
+            cwd=str(repo),
+            check=True,
         )
 
         run_command_safe(["git", "checkout", "-b", "feat/api-port"], cwd=str(repo), check=True)
@@ -244,11 +273,12 @@ class TestProductIntegrationScenarios:
             "requires_human_review": False,
         }
 
-        with patch("suggest_docs.setup_docs_environment") as mock_setup, patch(
-            "suggest_docs.find_relevant_files_optimized", return_value=["server.md"]
-        ), patch("suggest_docs.checkout_docs_from_base_branch"), patch(
-            "suggest_docs.push_and_open_pr"
-        ) as mock_push_pr:
+        with (
+            patch("suggest_docs.setup_docs_environment") as mock_setup,
+            patch("suggest_docs.find_relevant_files_optimized", return_value=["server.md"]),
+            patch("suggest_docs.checkout_docs_from_base_branch"),
+            patch("suggest_docs.push_and_open_pr") as mock_push_pr,
+        ):
 
             def setup_side_effect():
                 os.chdir(str(docs_repo))
@@ -284,7 +314,9 @@ class TestProductIntegrationScenarios:
         run_command_safe(["git", "add", "."], cwd=str(repo), check=True)
         run_command_safe(["git", "commit", "-m", "Initial"], cwd=str(repo), check=True)
         run_command_safe(
-            ["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=str(repo), check=True
+            ["git", "update-ref", "refs/remotes/origin/main", "main"],
+            cwd=str(repo),
+            check=True,
         )
 
         run_command_safe(["git", "checkout", "-b", "feat/user-email"], cwd=str(repo), check=True)
@@ -303,9 +335,11 @@ class TestProductIntegrationScenarios:
             "requires_human_review": False,
         }
 
-        with patch("suggest_docs.find_relevant_files_optimized", return_value=["user.md"]), patch(
-            "suggest_docs.checkout_docs_from_base_branch"
-        ), patch("suggest_docs.post_review_comment") as mock_comment:
+        with (
+            patch("suggest_docs.find_relevant_files_optimized", return_value=["user.md"]),
+            patch("suggest_docs.checkout_docs_from_base_branch"),
+            patch("suggest_docs.post_review_comment") as mock_comment,
+        ):
             with patch(
                 "doc_updater.DocumentationUpdater._default_ai_generator",
                 return_value=json.dumps(hallucinated_candidate),
@@ -340,7 +374,9 @@ class TestProductIntegrationScenarios:
         run_command_safe(["git", "add", "."], cwd=str(repo), check=True)
         run_command_safe(["git", "commit", "-m", "Initial"], cwd=str(repo), check=True)
         run_command_safe(
-            ["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=str(repo), check=True
+            ["git", "update-ref", "refs/remotes/origin/main", "main"],
+            cwd=str(repo),
+            check=True,
         )
 
         run_command_safe(["git", "checkout", "-b", "feat/broken-syntax"], cwd=str(repo), check=True)
@@ -354,11 +390,15 @@ class TestProductIntegrationScenarios:
 
         ai_mock = MagicMock()
 
-        with patch(
-            "suggest_docs.find_relevant_files_optimized", return_value=["service.md"]
-        ), patch("suggest_docs.checkout_docs_from_base_branch"), patch(
-            "suggest_docs.post_review_comment"
-        ) as mock_comment, patch("doc_updater.DocumentationUpdater._default_ai_generator", ai_mock):
+        with (
+            patch(
+                "suggest_docs.find_relevant_files_optimized",
+                return_value=["service.md"],
+            ),
+            patch("suggest_docs.checkout_docs_from_base_branch"),
+            patch("suggest_docs.post_review_comment") as mock_comment,
+            patch("doc_updater.DocumentationUpdater._default_ai_generator", ai_mock),
+        ):
             suggest_docs.main()
 
             assert ai_mock.call_count == 0
@@ -387,7 +427,9 @@ class TestProductIntegrationScenarios:
         run_command_safe(["git", "add", "."], cwd=str(repo), check=True)
         run_command_safe(["git", "commit", "-m", "Initial"], cwd=str(repo), check=True)
         run_command_safe(
-            ["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=str(repo), check=True
+            ["git", "update-ref", "refs/remotes/origin/main", "main"],
+            cwd=str(repo),
+            check=True,
         )
 
         run_command_safe(
@@ -401,16 +443,23 @@ class TestProductIntegrationScenarios:
         monkeypatch.setenv("COMMENT_BODY", "[update-docs]")
         monkeypatch.setenv("ENABLE_SECTION_UPDATER", "true")
 
-        with patch(
-            "suggest_docs.find_relevant_files_optimized", return_value=["guide.rst", "spec.adoc"]
-        ), patch("suggest_docs.checkout_docs_from_base_branch"), patch(
-            "suggest_docs.ask_ai_for_updated_content", return_value="NO_UPDATE_NEEDED"
-        ) as mock_legacy_ai, patch(
-            "suggest_docs._resolve_pr_push_target",
-            return_value=(
-                "feat/worker-threads",
-                "https://github.com/shreed27/Code-Doc-Ai.git",
-                False,
+        with (
+            patch(
+                "suggest_docs.find_relevant_files_optimized",
+                return_value=["guide.rst", "spec.adoc"],
+            ),
+            patch("suggest_docs.checkout_docs_from_base_branch"),
+            patch(
+                "suggest_docs.ask_ai_for_updated_content",
+                return_value="NO_UPDATE_NEEDED",
+            ) as mock_legacy_ai,
+            patch(
+                "suggest_docs._resolve_pr_push_target",
+                return_value=(
+                    "feat/worker-threads",
+                    "https://github.com/shreed27/Code-Doc-Ai.git",
+                    False,
+                ),
             ),
         ):
             suggest_docs.main()
@@ -437,20 +486,27 @@ class TestProductIntegrationScenarios:
         run_command_safe(["git", "add", "."], cwd=str(repo), check=True)
         run_command_safe(["git", "commit", "-m", "Initial helper"], cwd=str(repo), check=True)
         run_command_safe(
-            ["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=str(repo), check=True
+            ["git", "update-ref", "refs/remotes/origin/main", "main"],
+            cwd=str(repo),
+            check=True,
         )
 
         run_command_safe(["git", "checkout", "-b", "feat/rename-helper"], cwd=str(repo), check=True)
         run_command_safe(
-            ["git", "mv", "src/old_helper.py", "src/new_helper.py"], cwd=str(repo), check=True
+            ["git", "mv", "src/old_helper.py", "src/new_helper.py"],
+            cwd=str(repo),
+            check=True,
         )
         new_file = src_dir / "new_helper.py"
         new_file.write_text(
-            "def helper(x: int, factor: int = 2) -> int:\n    return x * factor\n", encoding="utf-8"
+            "def helper(x: int, factor: int = 2) -> int:\n    return x * factor\n",
+            encoding="utf-8",
         )
         run_command_safe(["git", "add", "src/new_helper.py"], cwd=str(repo), check=True)
         run_command_safe(
-            ["git", "commit", "-m", "Rename helper and add factor"], cwd=str(repo), check=True
+            ["git", "commit", "-m", "Rename helper and add factor"],
+            cwd=str(repo),
+            check=True,
         )
 
         monkeypatch.setenv("DOCS_SUBFOLDER", "docs")
@@ -463,16 +519,19 @@ class TestProductIntegrationScenarios:
             "requires_human_review": False,
         }
 
-        with patch("suggest_docs.find_relevant_files_optimized", return_value=["api.md"]), patch(
-            "suggest_docs._resolve_pr_push_target",
-            return_value=(
-                "feat/rename-helper",
-                "https://github.com/shreed27/Code-Doc-Ai.git",
-                False,
+        with (
+            patch("suggest_docs.find_relevant_files_optimized", return_value=["api.md"]),
+            patch(
+                "suggest_docs._resolve_pr_push_target",
+                return_value=(
+                    "feat/rename-helper",
+                    "https://github.com/shreed27/Code-Doc-Ai.git",
+                    False,
+                ),
             ),
-        ), patch("suggest_docs.checkout_docs_from_base_branch"), patch(
-            "suggest_docs.run_command_safe"
-        ) as mock_run:
+            patch("suggest_docs.checkout_docs_from_base_branch"),
+            patch("suggest_docs.run_command_safe") as mock_run,
+        ):
 
             def side_effect(cmd, *args, **kwargs):
                 if cmd[:2] == ["git", "push"]:
@@ -508,10 +567,14 @@ class TestProductIntegrationScenarios:
 
         run_command_safe(["git", "add", "."], cwd=str(repo), check=True)
         run_command_safe(
-            ["git", "commit", "-m", "Initial client and docs"], cwd=str(repo), check=True
+            ["git", "commit", "-m", "Initial client and docs"],
+            cwd=str(repo),
+            check=True,
         )
         run_command_safe(
-            ["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=str(repo), check=True
+            ["git", "update-ref", "refs/remotes/origin/main", "main"],
+            cwd=str(repo),
+            check=True,
         )
 
         run_command_safe(["git", "checkout", "-b", "feat/client-ssl"], cwd=str(repo), check=True)
@@ -534,14 +597,22 @@ class TestProductIntegrationScenarios:
             "requires_human_review": False,
         }
 
-        with patch(
-            "suggest_docs.find_relevant_files_optimized", return_value=["api.md", "overview.md"]
-        ), patch(
-            "suggest_docs._resolve_pr_push_target",
-            return_value=("feat/client-ssl", "https://github.com/shreed27/Code-Doc-Ai.git", False),
-        ), patch("suggest_docs.checkout_docs_from_base_branch"), patch(
-            "suggest_docs.run_command_safe"
-        ) as mock_run:
+        with (
+            patch(
+                "suggest_docs.find_relevant_files_optimized",
+                return_value=["api.md", "overview.md"],
+            ),
+            patch(
+                "suggest_docs._resolve_pr_push_target",
+                return_value=(
+                    "feat/client-ssl",
+                    "https://github.com/shreed27/Code-Doc-Ai.git",
+                    False,
+                ),
+            ),
+            patch("suggest_docs.checkout_docs_from_base_branch"),
+            patch("suggest_docs.run_command_safe") as mock_run,
+        ):
 
             def side_effect(cmd, *args, **kwargs):
                 if cmd[:2] == ["git", "push"]:
@@ -556,7 +627,8 @@ class TestProductIntegrationScenarios:
                 return json.dumps(candidate_api)
 
             with patch(
-                "doc_updater.DocumentationUpdater._default_ai_generator", side_effect=gen_candidate
+                "doc_updater.DocumentationUpdater._default_ai_generator",
+                side_effect=gen_candidate,
             ):
                 suggest_docs.main()
 
@@ -583,11 +655,15 @@ class TestProductIntegrationScenarios:
         run_command_safe(["git", "add", "."], cwd=str(repo), check=True)
         run_command_safe(["git", "commit", "-m", "Initial payments"], cwd=str(repo), check=True)
         run_command_safe(
-            ["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=str(repo), check=True
+            ["git", "update-ref", "refs/remotes/origin/main", "main"],
+            cwd=str(repo),
+            check=True,
         )
 
         run_command_safe(
-            ["git", "checkout", "-b", "feat/payment-currency"], cwd=str(repo), check=True
+            ["git", "checkout", "-b", "feat/payment-currency"],
+            cwd=str(repo),
+            check=True,
         )
         py_file.write_text("def pay(amount: int, currency: str = 'USD'): pass\n", encoding="utf-8")
         run_command_safe(["git", "add", "."], cwd=str(repo), check=True)
@@ -614,20 +690,25 @@ class TestProductIntegrationScenarios:
                 return json.dumps(candidate_invalid)
             return json.dumps(candidate_valid)
 
-        with patch(
-            "suggest_docs.find_relevant_files_optimized", return_value=["api.md", "config.md"]
-        ), patch(
-            "suggest_docs._resolve_pr_push_target",
-            return_value=(
-                "feat/payment-currency",
-                "https://github.com/shreed27/Code-Doc-Ai.git",
-                False,
+        with (
+            patch(
+                "suggest_docs.find_relevant_files_optimized",
+                return_value=["api.md", "config.md"],
             ),
-        ), patch("suggest_docs.checkout_docs_from_base_branch"), patch(
-            "suggest_docs.post_review_comment"
-        ) as mock_comment:
+            patch(
+                "suggest_docs._resolve_pr_push_target",
+                return_value=(
+                    "feat/payment-currency",
+                    "https://github.com/shreed27/Code-Doc-Ai.git",
+                    False,
+                ),
+            ),
+            patch("suggest_docs.checkout_docs_from_base_branch"),
+            patch("suggest_docs.post_review_comment") as mock_comment,
+        ):
             with patch(
-                "doc_updater.DocumentationUpdater._default_ai_generator", side_effect=gen_candidate
+                "doc_updater.DocumentationUpdater._default_ai_generator",
+                side_effect=gen_candidate,
             ):
                 suggest_docs.main()
 
@@ -653,13 +734,16 @@ class TestProductIntegrationScenarios:
         py_file.write_text("def start_session(): pass\ndef legacy_auth(): pass\n", encoding="utf-8")
         doc_file = docs_dir / "auth.md"
         doc_file.write_text(
-            "# Session\n\n## legacy_auth\nCall legacy_auth to start session.\n", encoding="utf-8"
+            "# Session\n\n## legacy_auth\nCall legacy_auth to start session.\n",
+            encoding="utf-8",
         )
 
         run_command_safe(["git", "add", "."], cwd=str(repo), check=True)
         run_command_safe(["git", "commit", "-m", "Initial session"], cwd=str(repo), check=True)
         run_command_safe(
-            ["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=str(repo), check=True
+            ["git", "update-ref", "refs/remotes/origin/main", "main"],
+            cwd=str(repo),
+            check=True,
         )
 
         run_command_safe(["git", "checkout", "-b", "feat/remove-legacy"], cwd=str(repo), check=True)
@@ -679,9 +763,11 @@ class TestProductIntegrationScenarios:
             "requires_human_review": False,
         }
 
-        with patch("suggest_docs.find_relevant_files_optimized", return_value=["auth.md"]), patch(
-            "suggest_docs.checkout_docs_from_base_branch"
-        ), patch("suggest_docs.post_review_comment") as mock_comment:
+        with (
+            patch("suggest_docs.find_relevant_files_optimized", return_value=["auth.md"]),
+            patch("suggest_docs.checkout_docs_from_base_branch"),
+            patch("suggest_docs.post_review_comment") as mock_comment,
+        ):
             with patch(
                 "doc_updater.DocumentationUpdater._default_ai_generator",
                 return_value=json.dumps(active_removed_candidate),
@@ -712,7 +798,9 @@ class TestProductIntegrationScenarios:
         run_command_safe(["git", "add", "."], cwd=str(repo), check=True)
         run_command_safe(["git", "commit", "-m", "Initial"], cwd=str(repo), check=True)
         run_command_safe(
-            ["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=str(repo), check=True
+            ["git", "update-ref", "refs/remotes/origin/main", "main"],
+            cwd=str(repo),
+            check=True,
         )
 
         run_command_safe(["git", "checkout", "-b", "feat/legacy-run"], cwd=str(repo), check=True)
@@ -724,14 +812,23 @@ class TestProductIntegrationScenarios:
         monkeypatch.setenv("COMMENT_BODY", "[update-docs]")
         monkeypatch.setenv("ENABLE_SECTION_UPDATER", "false")
 
-        with patch("suggest_docs.find_relevant_files_optimized", return_value=["mod.md"]), patch(
-            "suggest_docs.checkout_docs_from_base_branch"
-        ), patch(
-            "suggest_docs.ask_ai_for_updated_content", return_value="# Mod\nUpdated mod content.\n"
-        ) as mock_legacy_ai, patch(
-            "suggest_docs._resolve_pr_push_target",
-            return_value=("feat/legacy-run", "https://github.com/shreed27/Code-Doc-Ai.git", False),
-        ), patch("suggest_docs.run_command_safe") as mock_run:
+        with (
+            patch("suggest_docs.find_relevant_files_optimized", return_value=["mod.md"]),
+            patch("suggest_docs.checkout_docs_from_base_branch"),
+            patch(
+                "suggest_docs.ask_ai_for_updated_content",
+                return_value="# Mod\nUpdated mod content.\n",
+            ) as mock_legacy_ai,
+            patch(
+                "suggest_docs._resolve_pr_push_target",
+                return_value=(
+                    "feat/legacy-run",
+                    "https://github.com/shreed27/Code-Doc-Ai.git",
+                    False,
+                ),
+            ),
+            patch("suggest_docs.run_command_safe") as mock_run,
+        ):
 
             def side_effect(cmd, *args, **kwargs):
                 if cmd[:2] == ["git", "push"]:
@@ -764,7 +861,9 @@ class TestProductIntegrationScenarios:
         run_command_safe(["git", "add", "."], cwd=str(repo), check=True)
         run_command_safe(["git", "commit", "-m", "Initial"], cwd=str(repo), check=True)
         run_command_safe(
-            ["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=str(repo), check=True
+            ["git", "update-ref", "refs/remotes/origin/main", "main"],
+            cwd=str(repo),
+            check=True,
         )
 
         run_command_safe(["git", "checkout", "-b", "feat/task-delay"], cwd=str(repo), check=True)
@@ -779,12 +878,19 @@ class TestProductIntegrationScenarios:
         def buggy_generator(sys_p, user_p):
             raise RuntimeError("Midway AI connection timeout")
 
-        with patch("suggest_docs.find_relevant_files_optimized", return_value=["task.md"]), patch(
-            "suggest_docs.checkout_docs_from_base_branch"
-        ), patch(
-            "suggest_docs._resolve_pr_push_target",
-            return_value=("feat/task-delay", "https://github.com/shreed27/Code-Doc-Ai.git", False),
-        ), patch("suggest_docs.post_review_comment") as mock_comment:
+        with (
+            patch("suggest_docs.find_relevant_files_optimized", return_value=["task.md"]),
+            patch("suggest_docs.checkout_docs_from_base_branch"),
+            patch(
+                "suggest_docs._resolve_pr_push_target",
+                return_value=(
+                    "feat/task-delay",
+                    "https://github.com/shreed27/Code-Doc-Ai.git",
+                    False,
+                ),
+            ),
+            patch("suggest_docs.post_review_comment") as mock_comment,
+        ):
             with patch(
                 "doc_updater.DocumentationUpdater._default_ai_generator",
                 side_effect=buggy_generator,

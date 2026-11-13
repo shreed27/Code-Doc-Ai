@@ -15,15 +15,58 @@ import re
 import openai
 from openai import OpenAI
 
-from security_utils import run_command_safe, sanitize_output
+from security_utils import redact_secrets, run_command_safe, sanitize_output
+
+
+class RedactingCompletions:
+    def __init__(self, target):
+        self._target = target
+
+    def create(self, *args, **kwargs):
+        messages = kwargs.get("messages")
+        if messages and isinstance(messages, list):
+            redacted_messages = []
+            for msg in messages:
+                if isinstance(msg, dict) and "content" in msg and isinstance(msg["content"], str):
+                    new_msg = dict(msg)
+                    new_msg["content"] = redact_secrets(msg["content"])
+                    redacted_messages.append(new_msg)
+                else:
+                    redacted_messages.append(msg)
+            kwargs["messages"] = redacted_messages
+        return self._target.create(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._target, name)
+
+
+class RedactingChat:
+    def __init__(self, target):
+        self._target = target
+        self.completions = RedactingCompletions(target.completions)
+
+    def __getattr__(self, name):
+        return getattr(self._target, name)
+
+
+class RedactingOpenAIWrapper:
+    """Wraps OpenAI client to enforce a centralized secret redaction boundary on all model requests."""
+
+    def __init__(self, client):
+        self._client = client
+        self.chat = RedactingChat(client.chat)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
 
 
 def get_client():
-    """Get the shared OpenAI-compatible client."""
-    return OpenAI(
+    """Get the shared OpenAI-compatible client with centralized secret redaction boundary."""
+    client = OpenAI(
         base_url=os.environ["MODEL_API_BASE"],
         api_key=os.environ.get("MODEL_API_KEY") or "EMPTY",
     )
+    return RedactingOpenAIWrapper(client)
 
 
 def get_model_name():

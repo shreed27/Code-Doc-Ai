@@ -21,6 +21,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 from comments import (
@@ -557,6 +558,7 @@ def main():
             AppliedSectionUpdate,
             DocumentationUpdater,
             DocumentTransaction,
+            DocumentTransactionError,
             ValidationResult,
         )
         from github_ops import get_changed_source_files
@@ -626,10 +628,37 @@ def main():
                     print(
                         f"Committing multi-document update ({len(updates_to_write)} file(s)) via transaction..."
                     )
-                    tx = DocumentTransaction(docs_root=docs_root)
-                    tx.stage_updates(updates_to_write)
-                    tx.commit()
-                    modified_files.extend(list(updates_to_write.keys()))
+                    try:
+                        tx = DocumentTransaction(docs_root=docs_root)
+                        tx.stage_updates(updates_to_write)
+                        tx.commit()
+                        modified_files.extend(list(updates_to_write.keys()))
+                    except DocumentTransactionError as tx_err:
+                        print(f"Error during document transaction: {tx_err}")
+                        fail_rec = AppliedSectionUpdate(
+                            doc_path="transaction",
+                            section_id="transaction",
+                            section_heading="Transaction Integrity",
+                            status="transaction_failed",
+                            original_section_content="",
+                            new_section_content="",
+                            explanation=f"Transaction commit failed: {tx_err}",
+                            validation=ValidationResult(
+                                is_valid=False,
+                                failed_checks=[f"transaction_failed: {tx_err}"],
+                            ),
+                        )
+                        section_report.rejected_updates.append(fail_rec)
+                        if (review_mode or feature_mode) and not args.dry_run:
+                            post_review_comment(
+                                files_with_content,
+                                pr_number,
+                                commit_info,
+                                include_full_content=False,
+                                feature_section=feature_section,
+                                section_report=section_report,
+                            )
+                        sys.exit(1)
                 elif args.dry_run:
                     for f in updates_to_write:
                         print(f"[Dry Run] Would update {f}")
