@@ -195,4 +195,11 @@ class TestT7T8TransactionHardened:
 
         assert report.total_sections_applied == 1
         assert "retries" in report.updated_documents["guide.md"]
+
+        tx = DocumentTransaction(docs_root=tmp_path)
+        tx.stage_updates(report.updated_documents)
+        tx.commit()
+
+        assert tx.committed is True
         assert doc.read_text(encoding="utf-8") == report.updated_documents["guide.md"]
+        assert len(tx.cleanup_warnings) >= 1
