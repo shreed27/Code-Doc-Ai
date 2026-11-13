@@ -291,9 +291,7 @@ def parse_ai_response(
             proposed_content="",
             explanation="Invalid proposed_content type",
             requires_human_review=True,
-            review_reason=(
-                f"proposed_content must be a string, got {type(raw_content).__name__}."
-            ),
+            review_reason=(f"proposed_content must be a string, got {type(raw_content).__name__}."),
         )
 
     doc_path = data.get("doc_path", expected_doc_path)
@@ -464,9 +462,7 @@ class DocumentationValidator:
         prop_has_atx = bool(re.search(r"(?m)^[ \t]*#{1,6}\s+\S+", resp.proposed_content))
         # Note: Setext check ignores lines starting with '---' that are horizontal rules
         prop_has_setext = bool(
-            re.search(
-                r"(?m)^[A-Za-z0-9_`*][^\n]*\n[ \t]*(=+|-{2,})[ \t]*$", resp.proposed_content
-            )
+            re.search(r"(?m)^[A-Za-z0-9_`*][^\n]*\n[ \t]*(=+|-{2,})[ \t]*$", resp.proposed_content)
         )
         if not orig_has_headings and (prop_has_atx or prop_has_setext):
             failed.append("headings_introduced_in_leaf_section")
@@ -545,10 +541,7 @@ class DocumentationValidator:
             is_valid = token in allowed_all or len(token) <= 2
             if not is_valid:
                 # Evidence check: was it matched in impact evidence?
-                in_evidence = any(
-                    token == ev.matched_text
-                    for ev in req.impact_evidence
-                )
+                in_evidence = any(token == ev.matched_text for ev in req.impact_evidence)
                 if not in_evidence:
                     hallucinated_tokens.append(token)
 
@@ -745,9 +738,7 @@ class DocumentationUpdater:
         else:
             raw_impacts = []
             for src_path, (old_src, new_src) in code_changes.items():
-                file_impacts = self.mapper.map_file_impacts(
-                    old_src, new_src, src_path, parsed_docs
-                )
+                file_impacts = self.mapper.map_file_impacts(old_src, new_src, src_path, parsed_docs)
                 raw_impacts.extend(file_impacts)
 
         # Consolidate impacts to avoid duplicate section updates
@@ -782,9 +773,7 @@ class DocumentationUpdater:
                 report.total_sections_rejected += 1
                 continue
 
-            current_section_content = parsed_doc.get_section_content(
-                sec, include_children=False
-            )
+            current_section_content = parsed_doc.get_section_content(sec, include_children=False)
 
             # Check for source syntax errors upfront (H7): do not call AI
             syntax_errors = [
@@ -812,14 +801,10 @@ class DocumentationUpdater:
 
             # Build Request Context
             old_snips = {
-                src: code_changes[src][0]
-                for src in target.source_files
-                if src in code_changes
+                src: code_changes[src][0] for src in target.source_files if src in code_changes
             }
             new_snips = {
-                src: code_changes[src][1]
-                for src in target.source_files
-                if src in code_changes
+                src: code_changes[src][1] for src in target.source_files if src in code_changes
             }
 
             req = SectionUpdateRequest(

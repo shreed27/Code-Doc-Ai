@@ -153,9 +153,7 @@ Call `legacy_handler` to process v1 requests.
         new_code = "def export_data(format: str, compress: bool = True): pass"
 
         doc1 = "# User Guide\n\n## Exporting\nRun `export_data`."
-        doc2 = (
-            "# API Reference\n\n## Export Details\nThe `export_data` function details."
-        )
+        doc2 = "# API Reference\n\n## Export Details\nThe `export_data` function details."
 
         def multi_mock(_sys, user_prompt: str) -> str:
             if "docs/guide.md" in user_prompt:
@@ -217,9 +215,7 @@ Check logs at `/var/log/app.log`.
             "# Application\n\n## Overview\nThis is an untouched overview paragraph with exact spacing.\n\n## Getting Started"
         )
         # Suffix check
-        assert updated_text.endswith(
-            "## Troubleshooting\nCheck logs at `/var/log/app.log`.\n"
-        )
+        assert updated_text.endswith("## Troubleshooting\nCheck logs at `/var/log/app.log`.\n")
 
     def test_nested_markdown_sections_are_preserved(self):
         old_code = "def init_cluster(): pass"
@@ -542,9 +538,7 @@ class TestPromptAndResponseHelpers:
             reason="Fake reason",
         )
 
-        updater = DocumentationUpdater(
-            ai_generator=make_mock_ai({"proposed_content": "xyz"})
-        )
+        updater = DocumentationUpdater(ai_generator=make_mock_ai({"proposed_content": "xyz"}))
         report = updater.update_documentation(
             code_changes={"src/fake.py": ("x=1", "x=2")},
             documents={"doc.md": "# Doc\nContent"},
@@ -606,13 +600,15 @@ class TestAdversarialProbesP1ToP15:
         def counting_ai(_sys, _user):
             nonlocal calls
             calls += 1
-            return json.dumps({
-                "proposed_content": "Uncertain changes.",
-                "explanation": "Low confidence on behavioral impact",
-                "uncertainties": ["Ambiguous interface change"],
-                "requires_human_review": True,
-                "review_reason": "Insufficient evidence to determine public contract.",
-            })
+            return json.dumps(
+                {
+                    "proposed_content": "Uncertain changes.",
+                    "explanation": "Low confidence on behavioral impact",
+                    "uncertainties": ["Ambiguous interface change"],
+                    "requires_human_review": True,
+                    "review_reason": "Insufficient evidence to determine public contract.",
+                }
+            )
 
         old_code = "def process(): return 1"
         new_code = "def process(): return 2"
@@ -637,11 +633,13 @@ class TestAdversarialProbesP1ToP15:
         doc = "# Math\n\n## Calculation\nCall `old_calc`."
 
         # Case A: AI proposes active instruction to call removed symbol
-        active_ai = make_mock_ai({
-            "proposed_content": "Call `old_calc` or `new_calc` to perform the operation.",
-            "explanation": "Added new_calc",
-            "requires_human_review": False,
-        })
+        active_ai = make_mock_ai(
+            {
+                "proposed_content": "Call `old_calc` or `new_calc` to perform the operation.",
+                "explanation": "Added new_calc",
+                "requires_human_review": False,
+            }
+        )
         updater_a = DocumentationUpdater(ai_generator=active_ai)
         report_a = updater_a.update_documentation(
             code_changes={"src/calc.py": (old_code, new_code)},
@@ -655,11 +653,13 @@ class TestAdversarialProbesP1ToP15:
         )
 
         # Case B: AI proposes historical deprecation/removal note
-        historical_ai = make_mock_ai({
-            "proposed_content": "The `old_calc` function has been removed and deprecated. Use `new_calc` instead.",
-            "explanation": "Documented removal of old_calc",
-            "requires_human_review": False,
-        })
+        historical_ai = make_mock_ai(
+            {
+                "proposed_content": "The `old_calc` function has been removed and deprecated. Use `new_calc` instead.",
+                "explanation": "Documented removal of old_calc",
+                "requires_human_review": False,
+            }
+        )
         updater_b = DocumentationUpdater(ai_generator=historical_ai)
         report_b = updater_b.update_documentation(
             code_changes={"src/calc.py": (old_code, new_code)},
@@ -679,11 +679,13 @@ class TestAdversarialProbesP1ToP15:
         def static_ai(_s, _u):
             nonlocal calls
             calls += 1
-            return json.dumps({
-                "proposed_content": "Call `get_user(uid)` with user ID.",
-                "explanation": "Already matches up-to-date documentation",
-                "requires_human_review": False,
-            })
+            return json.dumps(
+                {
+                    "proposed_content": "Call `get_user(uid)` with user ID.",
+                    "explanation": "Already matches up-to-date documentation",
+                    "requires_human_review": False,
+                }
+            )
 
         updater = DocumentationUpdater(ai_generator=static_ai)
         report = updater.update_documentation(
@@ -714,11 +716,13 @@ class TestAdversarialProbesP1ToP15:
             "## Section 3\n"
             "Special symbols: 🚀 and `code_snippet`.\n"
         )
-        mock_ai = make_mock_ai({
-            "proposed_content": "Call `step_b(v)` with version.",
-            "explanation": "Updated step_b",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Call `step_b(v)` with version.",
+                "explanation": "Updated step_b",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/workflow.py": (old_code, new_code)},
@@ -740,11 +744,13 @@ class TestAdversarialProbesP1ToP15:
         doc = "# Network\n\n## Dial\nCall `dial`."
 
         # Document falsely claims timeout is a str
-        mock_ai = make_mock_ai({
-            "proposed_content": "Call `dial(timeout: str)` to connect.",
-            "explanation": "Documented timeout parameter",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Call `dial(timeout: str)` to connect.",
+                "explanation": "Documented timeout parameter",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/net.py": (old_code, new_code)},
@@ -765,11 +771,13 @@ class TestAdversarialProbesP1ToP15:
         doc = "# Connect\n\n## Dial\nCall `connect`."
 
         # Document claims timeout default is 45 instead of 60
-        mock_ai = make_mock_ai({
-            "proposed_content": "Call `connect(timeout=45)` with default timeout 45 seconds.",
-            "explanation": "Documented timeout parameter",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Call `connect(timeout=45)` with default timeout 45 seconds.",
+                "explanation": "Documented timeout parameter",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/connect.py": (old_code, new_code)},
@@ -790,11 +798,13 @@ class TestAdversarialProbesP1ToP15:
         new_code = "def backup(dest: str = '/tmp'): pass"
         doc = "# Backup\n\n## Run\nCall `backup`."
 
-        mock_ai = make_mock_ai({
-            "proposed_content": "Call `backup(dest)` or use `cloud_storage_auto_sync()` for cloud backup.",
-            "explanation": "Added cloud backup helper",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Call `backup(dest)` or use `cloud_storage_auto_sync()` for cloud backup.",
+                "explanation": "Added cloud backup helper",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/backup.py": (old_code, new_code)},
@@ -812,21 +822,23 @@ class TestAdversarialProbesP1ToP15:
     def test_p9_comments_and_string_literals_cannot_validate_symbols(self):
         """P9: Tokens found only in comments or string literals cannot validate AI hallucinations."""
         old_code = "def render(): pass"
-        new_code = '''
+        new_code = """
 # TODO: consider adding hardware_accelerated_gl()
 FALLBACK_LABEL = "legacy_raster_renderer"
 def render(quality: int = 1):
     msg = "software_engine_pipeline"
     return quality
-'''
+"""
         doc = "# Render\n\n## Overview\nCall `render`."
 
         # AI hallucinates functions from comments or strings
-        mock_ai = make_mock_ai({
-            "proposed_content": "Call `render(quality)` or call `hardware_accelerated_gl()`.",
-            "explanation": "Added hardware gl",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Call `render(quality)` or call `hardware_accelerated_gl()`.",
+                "explanation": "Added hardware gl",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/render.py": (old_code, new_code)},
@@ -848,11 +860,13 @@ def render(quality: int = 1):
         doc = "# Health\n\n## Check\nCall `ping`."
 
         # AI returns an unclosed code fence
-        mock_ai = make_mock_ai({
-            "proposed_content": "Call ping:\n```python\nping(count=1)\n",
-            "explanation": "Added code fence with ping",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Call ping:\n```python\nping(count=1)\n",
+                "explanation": "Added code fence with ping",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/health.py": (old_code, new_code)},
@@ -873,11 +887,13 @@ def render(quality: int = 1):
         doc = "# Installation\n\n## Quickstart\nCall `setup`."
 
         # AI attempts to inject subheadings into a leaf section
-        mock_ai = make_mock_ai({
-            "proposed_content": "Call `setup(mode)`.\n\n### Advanced Options\nSet mode to manual.",
-            "explanation": "Added advanced options subsection",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Call `setup(mode)`.\n\n### Advanced Options\nSet mode to manual.",
+                "explanation": "Added advanced options subsection",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/install.py": (old_code, new_code)},
@@ -906,11 +922,13 @@ def render(quality: int = 1):
             "## Running\n"
             "Call `run` to start.\n"
         )
-        mock_ai = make_mock_ai({
-            "proposed_content": "Call `run(verbose)` to start.",
-            "explanation": "Added verbose flag",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Call `run(verbose)` to start.",
+                "explanation": "Added verbose flag",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/run.py": (old_code, new_code)},
@@ -986,4 +1004,3 @@ def render(quality: int = 1):
         success = atomic_overwrite_file(doc_file, updated_text)
         assert success is True
         assert doc_file.read_text() == updated_text
-
