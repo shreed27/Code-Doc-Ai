@@ -1,0 +1,106 @@
+name: 'Upstream Documentation Enhancer'
+description: 'AI-powered documentation enhancer that automatically updates docs based on code changes'
+author: 'Your Name'
+
+branding:
+  icon: 'book'
+  color: 'blue'
+
+inputs:
+  model-api-base:
+    description: 'Base URL for an OpenAI-compatible API (e.g. vLLM on OpenShift AI, Gemini, etc.)'
+    required: true
+  model-api-key:
+    description: 'API key for the model endpoint (leave empty if not required)'
+    required: false
+    default: ''
+  model-name:
+    description: 'Model name to use for inference (e.g. meta-llama/Llama-3.1-8B-Instruct, gemini-2.0-flash)'
+    required: true
+  docs-repo-url:
+    description: 'URL of the documentation repository'
+    required: true
+  github-token:
+    description: 'GitHub token for creating PRs'
+    required: true
+  dry-run:
+    description: 'Simulate changes without writing files or pushing PR'
+    required: false
+    default: 'false'
+  pr-number:
+    description: 'Pull request number'
+    required: false
+  pr-base:
+    description: 'Base branch for PR comparison (e.g. origin/main)'
+    required: false
+    default: 'origin/main'
+  pr-head-sha:
+    description: 'Head reference/SHA for the PR'
+    required: false
+  docs-subfolder:
+    description: 'Optional: relative path to docs subfolder within the same repository (e.g., "docs", "content/docs")'
+    required: false
+    default: ''
+  docs-base-branch:
+    description: 'Base branch for docs repository PRs (e.g., "main" or "master")'
+    required: false
+    default: 'main'
+  comment-body:
+    description: 'The comment body text (used to detect [review-docs], [update-docs], or [review-feature] commands)'
+    required: false
+    default: ''
+  jira-url:
+    description: 'Jira instance URL (e.g., https://your-company.atlassian.net). Required for [review-feature].'
+    required: false
+    default: ''
+  jira-username:
+    description: 'Jira username/email for API authentication. Required for [review-feature].'
+    required: false
+    default: ''
+  jira-api-token:
+    description: 'Jira API token for authentication. Required for [review-feature].'
+    required: false
+    default: ''
+  google-sa-key:
+    description: 'Optional: Google service account JSON key for fetching Google Docs linked in Jira tickets. If not provided, Google Docs links will be flagged but content will not be fetched.'
+    required: false
+    default: ''
+  max-context-chars:
+    description: 'Maximum characters for LLM prompt content (default: 400000, ~100K tokens). Decrease for models with smaller context windows (e.g. 32000 for an 8K-token model).'
+    required: false
+    default: '400000'
+  style-config-path:
+    description: 'Path to a Markdown style configuration file (.md) containing documentation style guidelines. If not set, auto-detects .code-to-docs/style.md in the repository root.'
+    required: false
+    default: ''
+
+outputs:
+  status:
+    description: 'Status of the documentation enhancement'
+  modified-files:
+    description: 'JSON array of modified files'
+  pr-created:
+    description: 'Whether a PR was created'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  env:
+    MODEL_API_BASE: ${{ inputs.model-api-base }}
+    MODEL_API_KEY: ${{ inputs.model-api-key }}
+    MODEL_NAME: ${{ inputs.model-name }}
+    DOCS_REPO_URL: ${{ inputs.docs-repo-url }}
+    DOCS_SUBFOLDER: ${{ inputs.docs-subfolder }}
+    GH_TOKEN: ${{ inputs.github-token }}
+    DRY_RUN: ${{ inputs.dry-run }}
+    PR_NUMBER: ${{ inputs.pr-number }}
+    PR_BASE: ${{ inputs.pr-base }}
+    PR_HEAD_SHA: ${{ inputs.pr-head-sha }}
+    DOCS_BASE_BRANCH: ${{ inputs.docs-base-branch }}
+    COMMENT_BODY: ${{ inputs.comment-body }}
+    JIRA_URL: ${{ inputs.jira-url }}
+    JIRA_USERNAME: ${{ inputs.jira-username }}
+    JIRA_API_TOKEN: ${{ inputs.jira-api-token }}
+    GOOGLE_SA_KEY: ${{ inputs.google-sa-key }}
+    MAX_CONTEXT_CHARS: ${{ inputs.max-context-chars }}
+    STYLE_CONFIG_PATH: ${{ inputs.style-config-path }}
