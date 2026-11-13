@@ -558,7 +558,7 @@ def main():
                 old_code = res.stdout
             if os.path.exists(py_path):
                 try:
-                    with open(py_path, "r", encoding="utf-8") as f:
+                    with open(py_path, encoding="utf-8") as f:
                         new_code = f.read()
                 except OSError:
                     pass

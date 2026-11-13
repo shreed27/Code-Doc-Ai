@@ -22,7 +22,6 @@ from pathlib import Path
 from ast_intel import (
     ASTDelta,
     ConstantInfo,
-    ImportInfo,
     ParameterInfo,
     SymbolInfo,
     compute_ast_delta,
@@ -311,13 +310,13 @@ def parse_ai_response(
 
     raw_evidence = data.get("technical_evidence", [])
     if isinstance(raw_evidence, list):
-        technical_evidence = [str(x) for x in raw_evidence if isinstance(x, (str, int, float))]
+        technical_evidence = [str(x) for x in raw_evidence if isinstance(x, str | int | float)]
     else:
         technical_evidence = []
 
     raw_uncertainties = data.get("uncertainties", [])
     if isinstance(raw_uncertainties, list):
-        uncertainties = [str(x) for x in raw_uncertainties if isinstance(x, (str, int, float))]
+        uncertainties = [str(x) for x in raw_uncertainties if isinstance(x, str | int | float)]
     else:
         uncertainties = []
 
