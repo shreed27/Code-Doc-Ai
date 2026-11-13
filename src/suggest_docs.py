@@ -900,16 +900,29 @@ def main():
                     )
 
         elif update_mode and not modified_files and not args.dry_run:
-            print("All documentation is already up to date — no PR created.")
+            if section_report and (
+                section_report.rejected_updates or section_report.review_required_updates
+            ):
+                post_review_comment(
+                    [],
+                    pr_number,
+                    commit_info,
+                    include_full_content=False,
+                    feature_section=feature_section,
+                    section_report=section_report,
+                )
+            else:
+                print("All documentation is already up to date — no PR created.")
     else:
         if (review_mode or update_mode or feature_mode) and not args.dry_run:
-            print("Posting comment that no updates are needed...")
+            print("Posting review comment...")
             post_review_comment(
                 [],
                 pr_number,
                 commit_info,
                 include_full_content=False,
                 feature_section=feature_section,
+                section_report=section_report,
             )
         else:
             print("All documentation is already up to date — no PR created.")
