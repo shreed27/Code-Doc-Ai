@@ -153,7 +153,9 @@ Call `legacy_handler` to process v1 requests.
         new_code = "def export_data(format: str, compress: bool = True): pass"
 
         doc1 = "# User Guide\n\n## Exporting\nRun `export_data`."
-        doc2 = "# API Reference\n\n## Export Details\nThe `export_data` function details."
+        doc2 = (
+            "# API Reference\n\n## Export Details\nThe `export_data` function details."
+        )
 
         def multi_mock(_sys, user_prompt: str) -> str:
             if "docs/guide.md" in user_prompt:
@@ -215,7 +217,9 @@ Check logs at `/var/log/app.log`.
             "# Application\n\n## Overview\nThis is an untouched overview paragraph with exact spacing.\n\n## Getting Started"
         )
         # Suffix check
-        assert updated_text.endswith("## Troubleshooting\nCheck logs at `/var/log/app.log`.\n")
+        assert updated_text.endswith(
+            "## Troubleshooting\nCheck logs at `/var/log/app.log`.\n"
+        )
 
     def test_nested_markdown_sections_are_preserved(self):
         old_code = "def init_cluster(): pass"
@@ -538,7 +542,9 @@ class TestPromptAndResponseHelpers:
             reason="Fake reason",
         )
 
-        updater = DocumentationUpdater(ai_generator=make_mock_ai({"proposed_content": "xyz"}))
+        updater = DocumentationUpdater(
+            ai_generator=make_mock_ai({"proposed_content": "xyz"})
+        )
         report = updater.update_documentation(
             code_changes={"src/fake.py": ("x=1", "x=2")},
             documents={"doc.md": "# Doc\nContent"},
@@ -577,11 +583,15 @@ class TestAdversarialProbesP1ToP15:
             section_heading="Nonexistent",
             is_deterministic=True,
             confidence=1.0,
-            evidence=[ImpactEvidence("explicit_symbol", "missing_fn", "missing_fn", 1.0)],
+            evidence=[
+                ImpactEvidence("explicit_symbol", "missing_fn", "missing_fn", 1.0)
+            ],
             reason="Function added",
         )
         original_doc = "# Title\n\n## Real Section\nReal content."
-        updater = DocumentationUpdater(ai_generator=make_mock_ai({"proposed_content": "xyz"}))
+        updater = DocumentationUpdater(
+            ai_generator=make_mock_ai({"proposed_content": "xyz"})
+        )
         report = updater.update_documentation(
             code_changes={"src/missing.py": ("", "def missing_fn(): pass")},
             documents={"doc.md": original_doc},
@@ -937,7 +947,9 @@ def render(quality: int = 1):
 
         assert report.total_sections_applied == 1
         res = report.updated_documents["manual.md"]
-        assert res.startswith("---\ntitle: Operational Guide\nversion: 2.1\nauthor: Core Team\n---")
+        assert res.startswith(
+            "---\ntitle: Operational Guide\nversion: 2.1\nauthor: Core Team\n---"
+        )
         assert "run(verbose)" in res
 
     def test_p13_malformed_ai_responses_handled_safely(self):
@@ -946,14 +958,18 @@ def render(quality: int = 1):
 
         # null proposed_content
         resp_null = parse_ai_response(
-            json.dumps({"proposed_content": None, "explanation": "test"}), "doc.md", "sec"
+            json.dumps({"proposed_content": None, "explanation": "test"}),
+            "doc.md",
+            "sec",
         )
         assert resp_null.requires_human_review is True
         assert "proposed_content must be a string" in resp_null.review_reason
 
         # list proposed_content
         resp_list = parse_ai_response(
-            json.dumps({"proposed_content": ["a", "b"], "explanation": "test"}), "doc.md", "sec"
+            json.dumps({"proposed_content": ["a", "b"], "explanation": "test"}),
+            "doc.md",
+            "sec",
         )
         assert resp_list.requires_human_review is True
 
