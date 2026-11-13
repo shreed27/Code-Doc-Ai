@@ -208,6 +208,7 @@ def _push_docs_pr_for_merged(pr_number, docs_branch, docs_files, gh_token):
 
 
 def main():
+    repo_root = Path.cwd().resolve()
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dry-run",
@@ -447,6 +448,13 @@ def main():
     # update_mode creates a branch (needs to push); review_mode does a
     # read-only checkout of the docs subfolder.
     docs_subfolder = os.environ.get("DOCS_SUBFOLDER")
+    if docs_subfolder:
+        docs_root = (repo_root / docs_subfolder).resolve()
+    elif (repo_root / "docs_repo").is_dir():
+        docs_root = (repo_root / "docs_repo").resolve()
+    else:
+        docs_root = repo_root
+
     pr_merged = False
     is_fork = False
     push_failed = False
@@ -542,48 +550,113 @@ def main():
         os.environ.get("ENABLE_SECTION_UPDATER", "").strip().lower() in ("true", "1", "yes")
     )
 
+    section_report = None
     if enable_section_updater:
         print("Using section-level AST documentation updater...")
-        from doc_updater import DocumentationUpdater, atomic_overwrite_file
+        from doc_updater import (
+            AppliedSectionUpdate,
+            DocumentationUpdater,
+            DocumentTransaction,
+            ValidationResult,
+        )
+        from github_ops import get_changed_source_files
 
-        # Extract Python file changes from diff
-        code_changes = {}
-        py_files = set(re.findall(r"diff --git a/(\S+\.py) b/\S+\.py", diff))
+        # 1. Extract source file changes anchored at repo_root (Priority 1, N1)
         pr_base_ref = os.environ.get("PR_BASE", "origin/main")
-        for py_path in py_files:
-            old_code = ""
-            new_code = ""
-            res = run_command_safe(["git", "show", f"{pr_base_ref}:{py_path}"], check=False)
-            if res.returncode == 0:
-                old_code = res.stdout
-            if os.path.exists(py_path):
-                try:
-                    with open(py_path, encoding="utf-8") as f:
-                        new_code = f.read()
-                except OSError:
-                    pass
-            code_changes[py_path] = (old_code, new_code)
+        source_changes = get_changed_source_files(repo_root=repo_root, pr_base=pr_base_ref)
 
-        # Load documentation files
+        code_changes = {}
+        analysis_errors = []
+        for p, sc in source_changes.items():
+            if sc.error:
+                analysis_errors.append((p, sc.error))
+            else:
+                code_changes[p] = (sc.old_code, sc.new_code)
+
+        # 2. Partition relevant files: supported markdown vs non-markdown
+        md_files = [
+            f for f in relevant_files if f.lower().endswith((".md", ".markdown"))
+        ]
+        non_md_files = [
+            f for f in relevant_files if not f.lower().endswith((".md", ".markdown"))
+        ]
+
+        # 3. Load documentation files
         docs_map = {}
-        for file_path in relevant_files:
+        for file_path in md_files:
             content = load_full_content(file_path)
             if content:
                 docs_map[file_path] = content
 
         updater = DocumentationUpdater(style_guidelines=style_guidelines)
-        report = updater.update_documentation(code_changes, docs_map)
+        section_report = updater.update_documentation(code_changes, docs_map)
 
-        for file_path, orig_text in docs_map.items():
-            updated_text = report.updated_documents.get(file_path, orig_text)
-            if updated_text != orig_text:
-                files_with_content.append((file_path, orig_text, updated_text))
+        # Record any structured source analysis errors (Priority 1, N1)
+        for p, err_msg in analysis_errors:
+            section_report.rejected_updates.append(
+                AppliedSectionUpdate(
+                    doc_path=p,
+                    section_id="source_analysis",
+                    section_heading="Source Analysis",
+                    status="rejected",
+                    original_section_content="",
+                    new_section_content="",
+                    explanation=f"Source analysis failed: {err_msg}",
+                    validation=ValidationResult(
+                        is_valid=False,
+                        failed_checks=[f"source_analysis_failed: {err_msg}"],
+                    ),
+                )
+            )
+            section_report.total_sections_rejected += 1
+
+        # 4. Multi-document transaction with rollback (Priority 3, N3)
+        # All-or-nothing: apply only if no rejections occurred
+        if (
+            section_report.total_sections_applied > 0
+            and section_report.total_sections_rejected == 0
+        ):
+            updates_to_write = {
+                f: section_report.updated_documents[f]
+                for f in md_files
+                if f in section_report.updated_documents
+                and section_report.updated_documents[f] != docs_map.get(f)
+            }
+            if updates_to_write:
+                for f, new_text in updates_to_write.items():
+                    files_with_content.append((f, docs_map[f], new_text))
+
                 if update_mode and not args.dry_run:
-                    print(f"Updating {file_path} (atomic section update)...")
-                    if atomic_overwrite_file(file_path, updated_text):
-                        modified_files.append(file_path)
+                    print(
+                        f"Committing multi-document update ({len(updates_to_write)} file(s)) via transaction..."
+                    )
+                    tx = DocumentTransaction(docs_root=docs_root)
+                    tx.stage_updates(updates_to_write)
+                    tx.commit()
+                    modified_files.extend(list(updates_to_write.keys()))
                 elif args.dry_run:
-                    print(f"[Dry Run] Would update {file_path}")
+                    for f in updates_to_write:
+                        print(f"[Dry Run] Would update {f}")
+
+        # 5. Process unsupported non-markdown docs via legacy path (Priority 6, N5)
+        for file_path in non_md_files:
+            current = load_full_content(file_path)
+            if not current:
+                continue
+            updated = ask_ai_for_updated_content(
+                diff,
+                file_path,
+                current,
+                user_instructions=user_instructions,
+                file_instructions=file_instructions,
+                style_guidelines=style_guidelines,
+                pr_description=pr_description,
+            )
+            if updated.strip() != "NO_UPDATE_NEEDED":
+                files_with_content.append((file_path, current, updated))
+                if update_mode and not args.dry_run:
+                    if overwrite_file(file_path, updated):
+                        modified_files.append(file_path)
     elif args.parallel_updates and len(relevant_files) > 1:
         print(f"Generating updates in parallel (max {args.max_workers} workers)...")
         files_with_content = generate_updates_parallel(

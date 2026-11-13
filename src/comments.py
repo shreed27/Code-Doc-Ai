@@ -342,23 +342,147 @@ def parse_previous_review(pr_number):
         return result
 
 
+def format_section_update_review_comment(
+    report, commit_info=None, feature_section=""
+) -> str:
+    """
+    Format a detailed GitHub review comment for the section updater run (Priority 2, N2).
+
+    Distinguishes:
+    - Documentation updated
+    - No change required
+    - Rejected update (with concise reasons)
+    - Human review required (with concerns)
+    - Source analysis / syntax errors
+    Never exposes raw exception traces or secrets.
+    """
+    comment_parts = ["## \U0001f4da Documentation Review", ""]
+
+    if commit_info:
+        if "pr_number" in commit_info:
+            comment_parts.append(f"Analyzed PR: {commit_info['pr_url']}")
+        comment_parts.append(f"Latest commit: `{commit_info['short_hash']}`")
+        comment_parts.append("")
+
+    has_applied = bool(
+        report.applied_updates and any(u.status == "applied" for u in report.applied_updates)
+    )
+    has_rejected = bool(report.rejected_updates)
+    has_review = bool(report.review_required_updates)
+
+    if not has_applied and not has_rejected and not has_review:
+        comment_parts.append(
+            "\u2705 **No documentation updates needed** - all documentation sections are up to date with code changes!"
+        )
+        if feature_section:
+            comment_parts.append(feature_section)
+        return "\n".join(comment_parts)
+
+    # 1. Applied Updates
+    applied = [u for u in report.applied_updates if u.status == "applied"]
+    if applied:
+        comment_parts.append(f"### \U0001f4c4 Documentation Updated ({len(applied)} section(s))")
+        comment_parts.append("")
+        for u in applied:
+            file_url = get_docs_file_url(u.doc_path, commit_info)
+            link_str = f"[{u.doc_path}]({file_url})" if file_url else f"`{u.doc_path}`"
+            comment_parts.append(
+                f"- \u2705 **{link_str}** \u2192 Section `{u.section_heading}`: {u.explanation}"
+            )
+        comment_parts.append("")
+
+    # 2. No Change Required
+    no_change = [u for u in report.applied_updates if u.status == "no_change"]
+    if no_change:
+        comment_parts.append(f"### \u23ed\ufe0f No Change Required ({len(no_change)} section(s))")
+        comment_parts.append("")
+        for u in no_change:
+            comment_parts.append(
+                f"- \u23ed\ufe0f `{u.doc_path}` \u2192 Section `{u.section_heading}`: content already matches code changes."
+            )
+        comment_parts.append("")
+
+    # 3. Human Review Required
+    if has_review:
+        comment_parts.append(
+            f"### \u26a0\ufe0f Human Review Required ({len(report.review_required_updates)} item(s))"
+        )
+        comment_parts.append("")
+        comment_parts.append("The following sections require developer review:")
+        comment_parts.append("")
+        for u in report.review_required_updates:
+            reasons = (
+                "; ".join(u.validation.review_reasons)
+                if u.validation.review_reasons
+                else u.explanation
+            )
+            clean_reason = sanitize_output(reasons)
+            comment_parts.append(
+                f"- \u26a0\ufe0f `{u.doc_path}` \u2192 Section `{u.section_heading}`: {clean_reason}"
+            )
+        comment_parts.append("")
+
+    # 4. Rejected Updates
+    if has_rejected:
+        comment_parts.append(
+            f"### \u274c Rejected Updates ({len(report.rejected_updates)} item(s))"
+        )
+        comment_parts.append("")
+        comment_parts.append(
+            "The following proposed updates were rejected to prevent documentation errors or hallucination:"
+        )
+        comment_parts.append("")
+        for u in report.rejected_updates:
+            reasons = (
+                "; ".join(u.validation.failed_checks)
+                if u.validation.failed_checks
+                else u.explanation
+            )
+            clean_reason = sanitize_output(reasons)
+            comment_parts.append(
+                f"- \u274c `{u.doc_path}` \u2192 Section `{u.section_heading}`: {clean_reason}"
+            )
+        comment_parts.append("")
+
+    if feature_section:
+        comment_parts.append(feature_section)
+
+    return "\n".join(comment_parts)
+
+
 def post_review_comment(
-    files_with_content, pr_number, commit_info=None, include_full_content=True, feature_section=""
+    files_with_content,
+    pr_number,
+    commit_info=None,
+    include_full_content=True,
+    feature_section="",
+    section_report=None,
 ):
     """
-    Post a review comment on the PR with documentation suggestions
-
-    Args:
-        files_with_content: List of (file_path, original, updated) tuples
-        pr_number: PR number
-        commit_info: Commit information dict
-        include_full_content: If True, include full content; if False, only summary
+    Post a review comment on the PR with documentation suggestions.
+    Supports section update reporting (N2) when section_report is supplied.
     """
     if not pr_number or pr_number == "unknown":
         print("Warning: No PR number available, cannot post review comment")
         return False
 
-    # Build the review comment in markdown
+    if section_report is not None:
+        comment_body = format_section_update_review_comment(
+            section_report, commit_info=commit_info, feature_section=feature_section
+        )
+        # Write to temp file and comment via gh
+        temp_file = Path("/tmp/review_comment.md")
+        temp_file.write_text(comment_body, encoding="utf-8")
+        gh_token = os.environ.get("GH_TOKEN")
+        if gh_token:
+            run_command_safe(
+                ["gh", "pr", "comment", str(pr_number), "--body-file", str(temp_file)],
+                env={**os.environ, "GH_TOKEN": gh_token},
+                check=False,
+            )
+        return True
+
+    # Build legacy review comment in markdown
     comment_parts = []
     comment_parts.append("## \U0001f4da Documentation Review")
     comment_parts.append("")
