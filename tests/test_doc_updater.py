@@ -332,13 +332,13 @@ Service B config.
         assert report.updated_documents["auth.md"] == doc  # untouched
 
     def test_insufficient_evidence_produces_review_required(self):
-        old_code = "def calculate(): pass"
-        new_code = "def calculate(): pass  # internal reordering"
+        old_code = "def calculate(val: int): pass"
+        new_code = "def calculate(val: int, opt: bool = True): pass"
 
-        doc = "# Math\n## Calc\nUses `calculate`."
+        doc = "# Math\n\n## Calc\nUses `calculate`."
 
         mock_uncertain = {
-            "proposed_content": "Updated calculation internals.",
+            "proposed_content": "Uses `calculate` with new options.",
             "explanation": "Uncertain about behavioral impact",
             "uncertainties": ["Internal logic changed but no public API changes"],
             "requires_human_review": True,
@@ -349,19 +349,21 @@ Service B config.
         report = updater.update_documentation(
             code_changes={"src/math_util.py": (old_code, new_code)},
             documents={"math.md": doc},
-            precomputed_impacts=[],
         )
         assert report.total_sections_applied == 0
+        assert len(report.review_required_updates) == 1
+        assert report.review_required_updates[0].status == "review_required"
+        assert report.updated_documents["math.md"] == doc
 
     def test_failed_section_update_does_not_corrupt_other_documents(self):
         old_code = "def sync_all(): pass"
         new_code = "def sync_all(force: bool = False): pass"
 
-        doc_good = "# Sync\n## Main Sync\nCall `sync_all`."
-        doc_bad = "# Corrupted\n## Missing Section Title\n..."
+        doc_good = "# Sync\n\n## Main Sync\nCall `sync_all`."
+        doc_bad = "# Corrupted\n\n## Bad Section\nCall `sync_all`."
 
         def selective_ai(_s, user_prompt: str):
-            if "Missing Section" in user_prompt:
+            if "Bad Section" in user_prompt:
                 # Hallucination in bad doc
                 return json.dumps(
                     {
@@ -382,8 +384,10 @@ Service B config.
             documents={"good.md": doc_good, "bad.md": doc_bad},
         )
 
-        # Good doc is applied, bad doc is rejected without corrupting good doc
-        assert "sync_all(force)" in report.updated_documents["good.md"]
+        # All-or-nothing: rejection in bad doc prevents partial application to good doc!
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected >= 1
+        assert report.updated_documents["good.md"] == doc_good
         assert report.updated_documents["bad.md"] == doc_bad
 
     def test_rerunning_update_is_idempotent(self):
@@ -1020,3 +1024,328 @@ def render(quality: int = 1):
         success = atomic_overwrite_file(doc_file, updated_text)
         assert success is True
         assert doc_file.read_text() == updated_text
+
+
+class TestDocumentTransactionSafety:
+    """Tests multi-document transaction staging, path security, permissions, and rollback (Priority 3)."""
+
+    def test_transaction_extension_validation_rejects_rst_and_adoc(self, tmp_path):
+        from doc_updater import DocumentTransaction, UnsupportedDocumentExtensionError
+        import pytest
+
+        tx = DocumentTransaction(docs_root=tmp_path)
+        with pytest.raises(UnsupportedDocumentExtensionError):
+            tx.validate_destination_path("guide.rst")
+        with pytest.raises(UnsupportedDocumentExtensionError):
+            tx.validate_destination_path("reference.adoc")
+        with pytest.raises(UnsupportedDocumentExtensionError):
+            tx.validate_destination_path("script.py")
+
+        # Supported markdown extensions
+        assert tx.validate_destination_path("guide.md") == tmp_path / "guide.md"
+        assert tx.validate_destination_path("docs/spec.markdown") == (tmp_path / "docs/spec.markdown").resolve()
+
+    def test_transaction_path_traversal_rejected(self, tmp_path):
+        from doc_updater import DocumentTransaction, PathTraversalSecurityError
+        import pytest
+
+        tx = DocumentTransaction(docs_root=tmp_path)
+        with pytest.raises(PathTraversalSecurityError):
+            tx.validate_destination_path("../outside.md")
+        with pytest.raises(PathTraversalSecurityError):
+            tx.validate_destination_path("sub/../../etc/passwd.md")
+
+    def test_transaction_permission_preservation(self, tmp_path):
+        from doc_updater import DocumentTransaction
+        import os
+
+        doc_file = tmp_path / "secure.md"
+        doc_file.write_text("# Secure\nSecret info.\n")
+        os.chmod(doc_file, 0o600)
+
+        tx = DocumentTransaction(docs_root=tmp_path)
+        tx.stage_updates({"secure.md": "# Secure\nUpdated secret info.\n"})
+        tx.commit()
+
+        assert doc_file.read_text() == "# Secure\nUpdated secret info.\n"
+        current_mode = doc_file.stat().st_mode & 0o777
+        assert current_mode == 0o600
+
+    def test_transaction_atomic_commit_multiple_documents(self, tmp_path):
+        from doc_updater import DocumentTransaction
+
+        doc1 = tmp_path / "doc1.md"
+        doc2 = tmp_path / "sub" / "doc2.md"
+        doc1.write_text("# Doc 1\nOriginal\n")
+        doc2.parent.mkdir(parents=True)
+        doc2.write_text("# Doc 2\nOriginal\n")
+
+        tx = DocumentTransaction(docs_root=tmp_path)
+        tx.stage_updates({
+            "doc1.md": "# Doc 1\nUpdated 1\n",
+            "sub/doc2.md": "# Doc 2\nUpdated 2\n",
+        })
+        tx.commit()
+
+        assert doc1.read_text() == "# Doc 1\nUpdated 1\n"
+        assert doc2.read_text() == "# Doc 2\nUpdated 2\n"
+
+    def test_transaction_rollback_on_failure_restores_all_files(self, tmp_path, monkeypatch):
+        from doc_updater import DocumentTransaction, DocumentTransactionError
+        import pytest
+        import os
+
+        doc1 = tmp_path / "doc1.md"
+        doc2 = tmp_path / "doc2.md"
+        doc1.write_text("# Doc 1\nOriginal 1\n")
+        doc2.write_text("# Doc 2\nOriginal 2\n")
+
+        tx = DocumentTransaction(docs_root=tmp_path)
+        tx.stage_updates({
+            "doc1.md": "# Doc 1\nNew 1\n",
+            "doc2.md": "# Doc 2\nNew 2\n",
+        })
+
+        # Make os.replace fail on the second file
+        real_replace = os.replace
+        replace_count = 0
+
+        def flaky_replace(src, dst):
+            nonlocal replace_count
+            replace_count += 1
+            if replace_count == 2:
+                raise OSError("Simulated disk error during replacement")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", flaky_replace)
+
+        with pytest.raises(DocumentTransactionError, match="rolled back all replaced documents"):
+            tx.commit()
+
+        # Both original files must be restored completely!
+        assert doc1.read_text() == "# Doc 1\nOriginal 1\n"
+        assert doc2.read_text() == "# Doc 2\nOriginal 2\n"
+
+    def test_transaction_cleans_up_temporary_and_backup_files(self, tmp_path):
+        from doc_updater import DocumentTransaction
+
+        doc = tmp_path / "clean.md"
+        doc.write_text("# Clean\nContent\n")
+
+        tx = DocumentTransaction(docs_root=tmp_path)
+        tx.stage_updates({"clean.md": "# Clean\nNew content\n"})
+        tx.commit()
+
+        # Check no .stage_doc_ or .bak_doc_ temporary files remain
+        remaining = list(tmp_path.glob(".*"))
+        assert not any(".stage_doc_" in p.name or ".bak_doc_" in p.name for p in remaining)
+
+
+class TestTechnicalClaimValidation:
+    """Verifies strict technical claim validation (Priority 4, C1)."""
+
+    def test_c1_unknown_parameter_in_function_call_rejected(self):
+        """Reject function call introducing an invalid keyword parameter."""
+        old_code = "def create_user(name: str): pass"
+        new_code = "def create_user(name: str, email: str = ''): pass"
+        doc = "# Users\n\n## Create\nCall `create_user`."
+
+        mock_ai = make_mock_ai({
+            "proposed_content": "Call `create_user(name, admin=True)` to create an admin.",
+            "explanation": "Added admin parameter",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/user.py": (old_code, new_code)},
+            documents={"users.md": doc},
+        )
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected >= 1
+        assert any("unknown_parameter_in_call" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+
+    def test_c1_supports_nonexistent_option_rejected(self):
+        """Reject claim that function supports a nonexistent option."""
+        old_code = "def query(term: str): pass"
+        new_code = "def query(term: str, limit: int = 10): pass"
+        doc = "# Search\n\n## Query\nCall `query`."
+
+        mock_ai = make_mock_ai({
+            "proposed_content": "The `query` function supports the `max_retries` option for queries.",
+            "explanation": "Documented query options",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/search.py": (old_code, new_code)},
+            documents={"search.md": doc},
+        )
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected >= 1
+        assert any("unsupported_option_or_parameter" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+
+    def test_c1_invented_rate_limit_or_numeric_claim_rejected(self):
+        """Reject fabricated numeric limits and claims not found in source code."""
+        old_code = "def send(): pass"
+        new_code = "def send(data: str): pass"
+        doc = "# API\n\n## Send\nCall `send`."
+
+        mock_ai = make_mock_ai({
+            "proposed_content": "Call `send(data)`. All requests are rate limited to 500 requests per minute.",
+            "explanation": "Added rate limit",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/api.py": (old_code, new_code)},
+            documents={"api.md": doc},
+        )
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected >= 1
+        assert any("unsupported_numeric_claim" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+
+    def test_c1_return_type_mismatch_rejected(self):
+        """Reject documentation claiming return type conflicting with source annotation."""
+        old_code = "def count_items() -> int: return 0"
+        new_code = "def count_items() -> int: return 42"
+        doc = "# Counters\n\n## Count\nCall `count_items`."
+
+        mock_ai = make_mock_ai({
+            "proposed_content": "The `count_items` function returns a list of strings.",
+            "explanation": "Documented return value",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/counter.py": (old_code, new_code)},
+            documents={"counters.md": doc},
+        )
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected >= 1
+        assert any("return_type_mismatch" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+
+    def test_c1_unsupported_environment_variable_rejected(self):
+        """Reject invented environment variable names not accessed in source."""
+        old_code = "import os\ndef init(): pass"
+        new_code = "import os\ndef init(debug: bool = False): pass"
+        doc = "# Config\n\n## Init\nCall `init`."
+
+        mock_ai = make_mock_ai({
+            "proposed_content": "Call `init(debug)` and configure database via `MY_APP_SECRET_ACCESS_KEY` environment variable.",
+            "explanation": "Added env config",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/init.py": (old_code, new_code)},
+            documents={"config.md": doc},
+        )
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected >= 1
+        assert any("unsupported_environment_variable" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+
+
+class TestRemovedSymbolsStrictValidation:
+    """Verifies strict removed symbol validation (Priority 5, C3)."""
+
+    def test_c3_call_removed_symbol_with_migration_keyword_rejected(self):
+        """Reject active instruction to call removed symbol even if 'migration' is in the sentence."""
+        old_code = "def legacy_handler(): pass"
+        new_code = "def v2_handler(): pass"
+        doc = "# API\n\n## Handler\nCall `legacy_handler`."
+
+        mock_ai = make_mock_ai({
+            "proposed_content": "Call `legacy_handler` to handle migration of requests.",
+            "explanation": "Updated handler for migration",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/handler.py": (old_code, new_code)},
+            documents={"api.md": doc},
+        )
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected >= 1
+        assert any("active_reference_to_removed_symbol" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+
+    def test_c3_call_removed_symbol_not_deprecated_claim_rejected(self):
+        """Reject active instruction claiming removed symbol is 'not deprecated'."""
+        old_code = "def legacy_handler(): pass"
+        new_code = "def v2_handler(): pass"
+        doc = "# API\n\n## Handler\nCall `legacy_handler`."
+
+        mock_ai = make_mock_ai({
+            "proposed_content": "Call `legacy_handler`; it is not deprecated.",
+            "explanation": "Handler note",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/handler.py": (old_code, new_code)},
+            documents={"api.md": doc},
+        )
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected >= 1
+        assert any("active_reference_to_removed_symbol" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+
+    def test_c3_supported_removal_explanation_accepted(self):
+        """Accept factual statement that removed symbol was removed in a release."""
+        old_code = "def legacy_handler(): pass"
+        new_code = "def v2_handler(): pass"
+        doc = "# API\n\n## Handler\nCall `legacy_handler`."
+
+        mock_ai = make_mock_ai({
+            "proposed_content": "`legacy_handler` was removed in version 2.0.",
+            "explanation": "Removal notice",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/handler.py": (old_code, new_code)},
+            documents={"api.md": doc},
+        )
+        assert report.total_sections_applied == 1
+        assert "was removed in version 2.0" in report.updated_documents["api.md"]
+
+    def test_c3_supported_replacement_notice_accepted(self):
+        """Accept explicit replacement notice directing users to replacement function."""
+        old_code = "def legacy_handler(): pass"
+        new_code = "def new_handler(): pass"
+        doc = "# API\n\n## Handler\nCall `legacy_handler`."
+
+        mock_ai = make_mock_ai({
+            "proposed_content": "Replace `legacy_handler` with `new_handler`.",
+            "explanation": "Replacement notice",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/handler.py": (old_code, new_code)},
+            documents={"api.md": doc},
+        )
+        assert report.total_sections_applied == 1
+        assert "Replace `legacy_handler` with `new_handler`" in report.updated_documents["api.md"]
+
+    def test_c3_unchanged_doc_with_active_deleted_symbol_flags_review(self):
+        """If AI proposes no_change but doc still has active instructions for a deleted symbol, flag review!"""
+        old_code = "def old_fn(): pass"
+        new_code = "def new_fn(): pass"
+        doc = "# Guide\n\n## Section\nCall `old_fn` to start.\n"
+
+        # AI proposes identical content
+        mock_ai = make_mock_ai({
+            "proposed_content": "Call `old_fn` to start.\n",
+            "explanation": "No change",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/service.py": (old_code, new_code)},
+            documents={"guide.md": doc},
+        )
+        # Must NOT silently report no_change! Must flag review_required!
+        assert report.total_sections_applied == 0
+        assert len(report.review_required_updates) == 1
+        assert report.review_required_updates[0].status == "review_required"
+        assert "Removed symbol" in report.review_required_updates[0].explanation
+
