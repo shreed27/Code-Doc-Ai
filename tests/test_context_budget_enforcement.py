@@ -103,3 +103,80 @@ class TestContextBudgetEnforcement:
         # Target section and essential symbols are preserved
         assert "Call `process`." in prompt
         assert "process" in prompt
+
+    def test_serialized_http_body_budget_enforcement_60k(self):
+        """
+        Priority 7: 60,000 configured budget with potentially 61,668-byte HTTP body.
+        Verifies that calculate_serialized_request_size accurately computes JSON escaping
+        and envelope overhead, and that build_update_prompt never allows the outbound
+        serialized JSON HTTP request to exceed the 60,000 budget.
+        """
+        from doc_updater import _SYSTEM_PROMPT, calculate_serialized_request_size
+
+        # Construct code snippets that, when combined with target doc and JSON escaping,
+        # would produce ~61,668 bytes if unconstrained.
+        doc_content = "# Section\n" + ("Paragraph with quotes \"and\" newlines \\ and symbols.\n" * 300)
+        old_code = "def worker():\n" + ("    x = 'some string with \"quotes\" and \\escapes\\'\n" * 400)
+        new_code = "def worker(flag: bool = True):\n" + ("    x = 'some string with \"quotes\" and \\escapes\\'\n" * 400)
+
+        req = SectionUpdateRequest(
+            doc_path="doc.md",
+            section_id="doc/worker",
+            section_heading="Worker",
+            current_section_content=doc_content,
+            source_files=["src/worker.py"],
+            changed_symbols=["worker"],
+            change_categories=["api"],
+            impact_reasons=["Signature change"],
+            impact_evidence=[],
+            old_code_snippets={"src/worker.py": old_code},
+            new_code_snippets={"src/worker.py": new_code},
+            ast_deltas={},
+            style_guidelines="Be concise.",
+        )
+
+        budget = 60000
+        prompt = build_update_prompt(req, max_context_chars=budget)
+        serialized_size = calculate_serialized_request_size("gpt-4o", _SYSTEM_PROMPT, prompt)
+
+        # The serialized HTTP payload MUST NOT exceed 60,000 bytes!
+        assert serialized_size <= budget
+
+    def test_oversized_diff_12k_budget_produces_visible_pr_comment_and_exits_1(self, monkeypatch):
+        """
+        Priority 7: 12,000 budget with oversized diff (>90%).
+        Must NOT silently exit 0.
+        Must post a visible PR comment reporting review_required and exit with code 1.
+        """
+        import sys
+        import suggest_docs
+
+        monkeypatch.setenv("MAX_CONTEXT_CHARS", "12000")
+        monkeypatch.setenv("PR_NUMBER", "42")
+        monkeypatch.setattr(suggest_docs, "get_git_diff", lambda *args, **kwargs: "+" * 11000)
+        monkeypatch.setattr(suggest_docs, "get_commit_info", lambda *args, **kwargs: {"short_hash": "1234567", "repo_url": "https://github.com/org/repo", "pr_url": "https://github.com/org/repo/pull/42"})
+
+        posted_comments = []
+
+        def mock_post_review_comment(files, pr_num, commit_info, **kwargs):
+            sec_report = kwargs.get("section_report")
+            posted_comments.append((pr_num, sec_report))
+
+        monkeypatch.setattr(suggest_docs, "post_review_comment", mock_post_review_comment)
+
+        test_args = ["suggest_docs.py", "--review-mode"]
+        monkeypatch.setattr(sys, "argv", test_args)
+
+        with pytest.raises(SystemExit) as exc_info:
+            suggest_docs.main()
+
+        # Must exit with non-zero code 1
+        assert exc_info.value.code == 1
+
+        # Must have posted a comment with review_required status
+        assert len(posted_comments) == 1
+        pr_num, sec_report = posted_comments[0]
+        assert pr_num == "42"
+        assert sec_report is not None
+        assert len(sec_report.review_required_updates) == 1
+        assert "context budget" in sec_report.review_required_updates[0].explanation.lower()
