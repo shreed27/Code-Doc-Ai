@@ -21,7 +21,6 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -29,8 +28,8 @@ import pytest
 # Ensure openai is stubbed
 sys.modules.setdefault("openai", MagicMock())
 
-from security_utils import run_command_safe
 import suggest_docs
+from security_utils import run_command_safe
 
 
 @pytest.fixture
@@ -513,9 +512,10 @@ class TestProductIntegrationScenarios:
             "explanation": "Added currency",
             "requires_human_review": False,
         }
+        # Unknown parameter in function call triggers rejection
         candidate_invalid = {
-            "proposed_content": "Configure with UNSUPPORTED_FAKE_PAYMENT_ENV_VAR.",
-            "explanation": "Invented env var",
+            "proposed_content": "Call pay(amount, admin=True) to override payment.",
+            "explanation": "Invented param admin",
             "requires_human_review": False,
         }
 
@@ -538,7 +538,7 @@ class TestProductIntegrationScenarios:
             assert report is not None
             assert report.total_sections_rejected > 0
 
-        # Neither file should be updated on disk
+        # Neither file should be updated on disk (atomic rollback / all-or-nothing policy)
         assert doc1.read_text(encoding="utf-8") == doc1_original
         assert doc2.read_text(encoding="utf-8") == doc2_original
 
@@ -619,14 +619,21 @@ class TestProductIntegrationScenarios:
 
         with patch("suggest_docs.find_relevant_files_optimized", return_value=["mod.md"]), \
              patch("suggest_docs.checkout_docs_from_base_branch"), \
-             patch("suggest_docs.ask_ai_for_updated_content", return_value="Updated mod doc") as mock_legacy_ai, \
-             patch("suggest_docs.overwrite_file", return_value=True) as mock_overwrite, \
-             patch("suggest_docs._resolve_pr_push_target", return_value=("feat/legacy-run", "https://github.com/shreed27/Code-Doc-Ai.git", False)):
+             patch("suggest_docs.ask_ai_for_updated_content", return_value="# Mod\nUpdated mod content.\n") as mock_legacy_ai, \
+             patch("suggest_docs._resolve_pr_push_target", return_value=("feat/legacy-run", "https://github.com/shreed27/Code-Doc-Ai.git", False)), \
+             patch("suggest_docs.run_command_safe") as mock_run:
+
+            def side_effect(cmd, *args, **kwargs):
+                if cmd[:2] == ["git", "push"]:
+                    return MagicMock(returncode=0, stdout="", stderr="")
+                return run_command_safe(cmd, *args, **kwargs)
+
+            mock_run.side_effect = side_effect
 
             suggest_docs.main()
 
             mock_legacy_ai.assert_called_once()
-            mock_overwrite.assert_called_once()
+            assert "Updated mod content" in doc_file.read_text(encoding="utf-8")
 
     def test_generator_failure_midway_visible_report_and_no_partial_writes(self, git_repo, monkeypatch):
         """Scenario 12: generator failure midway rolls back transaction and surfaces visible error."""

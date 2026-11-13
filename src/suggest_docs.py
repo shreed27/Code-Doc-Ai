@@ -727,7 +727,7 @@ def main():
             else:
                 if docs_subfolder:
                     print("Same-repo scenario: committing docs...")
-                    os.chdir("..")
+                    os.chdir(repo_root)
                     docs_files = [
                         f"{docs_subfolder}/{f}" if not f.startswith(docs_subfolder) else f
                         for f in modified_files

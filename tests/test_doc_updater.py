@@ -1030,8 +1030,9 @@ class TestDocumentTransactionSafety:
     """Tests multi-document transaction staging, path security, permissions, and rollback (Priority 3)."""
 
     def test_transaction_extension_validation_rejects_rst_and_adoc(self, tmp_path):
-        from doc_updater import DocumentTransaction, UnsupportedDocumentExtensionError
         import pytest
+
+        from doc_updater import DocumentTransaction, UnsupportedDocumentExtensionError
 
         tx = DocumentTransaction(docs_root=tmp_path)
         with pytest.raises(UnsupportedDocumentExtensionError):
@@ -1046,8 +1047,9 @@ class TestDocumentTransactionSafety:
         assert tx.validate_destination_path("docs/spec.markdown") == (tmp_path / "docs/spec.markdown").resolve()
 
     def test_transaction_path_traversal_rejected(self, tmp_path):
-        from doc_updater import DocumentTransaction, PathTraversalSecurityError
         import pytest
+
+        from doc_updater import DocumentTransaction, PathTraversalSecurityError
 
         tx = DocumentTransaction(docs_root=tmp_path)
         with pytest.raises(PathTraversalSecurityError):
@@ -1056,8 +1058,9 @@ class TestDocumentTransactionSafety:
             tx.validate_destination_path("sub/../../etc/passwd.md")
 
     def test_transaction_permission_preservation(self, tmp_path):
-        from doc_updater import DocumentTransaction
         import os
+
+        from doc_updater import DocumentTransaction
 
         doc_file = tmp_path / "secure.md"
         doc_file.write_text("# Secure\nSecret info.\n")
@@ -1091,9 +1094,11 @@ class TestDocumentTransactionSafety:
         assert doc2.read_text() == "# Doc 2\nUpdated 2\n"
 
     def test_transaction_rollback_on_failure_restores_all_files(self, tmp_path, monkeypatch):
-        from doc_updater import DocumentTransaction, DocumentTransactionError
-        import pytest
         import os
+
+        import pytest
+
+        from doc_updater import DocumentTransaction, DocumentTransactionError
 
         doc1 = tmp_path / "doc1.md"
         doc2 = tmp_path / "doc2.md"
