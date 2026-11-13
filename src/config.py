@@ -18,6 +18,25 @@ from openai import OpenAI
 from security_utils import redact_secrets, run_command_safe, sanitize_output
 
 
+def _redact_message_content(content):
+    if isinstance(content, str):
+        return redact_secrets(content)
+    if isinstance(content, list):
+        redacted_list = []
+        for item in content:
+            if isinstance(item, dict):
+                new_item = dict(item)
+                if "text" in new_item and isinstance(new_item["text"], str):
+                    new_item["text"] = redact_secrets(new_item["text"])
+                redacted_list.append(new_item)
+            elif isinstance(item, str):
+                redacted_list.append(redact_secrets(item))
+            else:
+                redacted_list.append(item)
+        return redacted_list
+    return content
+
+
 class RedactingCompletions:
     def __init__(self, target):
         self._target = target
@@ -27,13 +46,24 @@ class RedactingCompletions:
         if messages and isinstance(messages, list):
             redacted_messages = []
             for msg in messages:
-                if isinstance(msg, dict) and "content" in msg and isinstance(msg["content"], str):
+                if isinstance(msg, dict):
                     new_msg = dict(msg)
-                    new_msg["content"] = redact_secrets(msg["content"])
+                    if "content" in new_msg:
+                        new_msg["content"] = _redact_message_content(new_msg["content"])
                     redacted_messages.append(new_msg)
+                elif hasattr(msg, "content"):
+                    try:
+                        msg.content = _redact_message_content(msg.content)
+                    except Exception:
+                        pass
+                    redacted_messages.append(msg)
                 else:
                     redacted_messages.append(msg)
             kwargs["messages"] = redacted_messages
+
+        if "prompt" in kwargs and isinstance(kwargs["prompt"], str):
+            kwargs["prompt"] = redact_secrets(kwargs["prompt"])
+
         return self._target.create(*args, **kwargs)
 
     def __getattr__(self, name):
@@ -55,6 +85,8 @@ class RedactingOpenAIWrapper:
     def __init__(self, client):
         self._client = client
         self.chat = RedactingChat(client.chat)
+        if hasattr(client, "completions"):
+            self.completions = RedactingCompletions(client.completions)
 
     def __getattr__(self, name):
         return getattr(self._client, name)

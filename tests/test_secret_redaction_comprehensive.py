@@ -104,6 +104,51 @@ class TestSecretRedactionPatterns:
         assert "DB_PASSWORD = " in redacted
         assert "CLIENT_SECRET = " in redacted
 
+    def test_demonstrated_leaks_unquoted_and_quoted(self):
+        # 1. Unquoted client_secret: value (YAML / prose)
+        yaml_text = "auth:\n  client_id: test_id\n  client_secret: unquoted_secret_val_123"
+        redacted_yaml = redact_secrets(yaml_text)
+        assert "unquoted_secret_val_123" not in redacted_yaml
+        assert "client_secret: [REDACTED]" in redacted_yaml
+        assert "client_id: test_id" in redacted_yaml
+
+        # 2. Shell DB_PASSWORD=value
+        env_text = "DB_USER=postgres\nDB_PASSWORD=my_db_secret_pass_456\nPORT=5432"
+        redacted_env = redact_secrets(env_text)
+        assert "my_db_secret_pass_456" not in redacted_env
+        assert "DB_PASSWORD=[REDACTED]" in redacted_env
+        assert "PORT=5432" in redacted_env
+
+        # 3. password: value
+        pw_text = "credentials:\n  username: admin\n  password: secret_admin_pass_789"
+        redacted_pw = redact_secrets(pw_text)
+        assert "secret_admin_pass_789" not in redacted_pw
+        assert "password: [REDACTED]" in redacted_pw
+
+        # 4. api_key = value (Python / config)
+        py_text = "api_key = my_api_key_value_999\nservice_url = 'https://api.test'"
+        redacted_py = redact_secrets(py_text)
+        assert "my_api_key_value_999" not in redacted_py
+        assert "api_key = [REDACTED]" in redacted_py
+
+        # 5. X-API-Key: value (HTTP header)
+        header_text = "GET /v1/data HTTP/1.1\nX-API-Key: x_header_secret_abc123\nHost: api.test"
+        redacted_header = redact_secrets(header_text)
+        assert "x_header_secret_abc123" not in redacted_header
+        assert "X-API-Key: [REDACTED]" in redacted_header
+
+        # 6. Dictionary-style "Authorization": "Basic ..."
+        dict_text = '{"Authorization": "Basic dXNlcjpwYXNzMTIzNDU2", "Content-Type": "application/json"}'
+        redacted_dict = redact_secrets(dict_text)
+        assert "dXNlcjpwYXNzMTIzNDU2" not in redacted_dict
+        assert "[REDACTED_TOKEN]" in redacted_dict
+
+        # 7. Normal prose must NOT be blindly redacted
+        prose_text = "Please enter your password to log in. The API key must be kept secret."
+        redacted_prose = redact_secrets(prose_text)
+        assert "enter your password to log in" in redacted_prose
+        assert "The API key must be kept secret" in redacted_prose
+
     def test_private_key_blocks(self):
         text = """
 -----BEGIN RSA PRIVATE KEY-----
@@ -140,3 +185,34 @@ class TestOutboundModelRedactionWrapper:
         assert "super_secret_pw" not in user_msg
         assert test_sk not in user_msg
         assert "[REDACTED]" in user_msg or "[REDACTED_OPENAI_KEY]" in user_msg
+
+    def test_serialized_http_payload_never_leaks_secrets(self):
+        import json
+
+        mock_raw_client = MagicMock()
+        planted_secrets = [
+            "planted_db_pass_12345",
+            "planted_client_secret_67890",
+            "planted_api_key_abcde",
+        ]
+
+        def fake_create(*args, **kwargs):
+            # Capture actual serialized payload as it would travel over the wire
+            serialized = json.dumps(kwargs)
+            for secret in planted_secrets:
+                assert secret not in serialized
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        mock_raw_client.chat.completions.create.side_effect = fake_create
+        wrapper = RedactingOpenAIWrapper(mock_raw_client)
+
+        payload_content = (
+            f"Config:\n"
+            f"DB_PASSWORD={planted_secrets[0]}\n"
+            f"client_secret: {planted_secrets[1]}\n"
+            f"api_key = {planted_secrets[2]}\n"
+        )
+        wrapper.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": payload_content}],
+        )

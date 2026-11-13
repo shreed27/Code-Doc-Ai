@@ -342,16 +342,20 @@ def parse_previous_review(pr_number):
         return result
 
 
-def format_section_update_review_comment(report, commit_info=None, feature_section="") -> str:
+def format_section_update_review_comment(
+    report, commit_info=None, feature_section="", review_mode=False
+) -> str:
     """
-    Format a detailed GitHub review comment for the section updater run (Priority 2, N2).
+    Format a detailed GitHub review comment for the section updater run (Priority 1 & Priority 5).
 
     Distinguishes:
-    - Documentation updated
+    - Documentation updated (ONLY when actually committed to disk by transaction)
+    - Proposed documentation updates (in review mode)
     - No change required
     - Rejected update (with concise reasons)
     - Human review required (with concerns)
     - Source analysis / syntax errors
+    - Transaction failures
     Never exposes raw exception traces or secrets.
     """
     comment_parts = ["## \U0001f4da Documentation Review", ""]
@@ -362,15 +366,26 @@ def format_section_update_review_comment(report, commit_info=None, feature_secti
         comment_parts.append(f"Latest commit: `{commit_info['short_hash']}`")
         comment_parts.append("")
 
-    has_applied = bool(
-        report.applied_updates
-        and any(u.status in ("applied", "updated") for u in report.applied_updates)
-    )
+    committed = getattr(report, "committed_updates", [])
+    applied = [u for u in report.applied_updates if u.status in ("applied", "updated")]
+    has_committed = bool(committed)
+    has_applied = bool(applied)
     has_rejected = bool(report.rejected_updates)
     has_review = bool(report.review_required_updates)
     has_source_errors = bool(getattr(report, "source_analysis_errors", []))
+    tx_failed = list(getattr(report, "transaction_failures", [])) + [
+        u for u in report.rejected_updates if u.status == "transaction_failed"
+    ]
+    has_tx_errors = bool(tx_failed)
 
-    if not has_applied and not has_rejected and not has_review and not has_source_errors:
+    if (
+        not has_committed
+        and not has_applied
+        and not has_rejected
+        and not has_review
+        and not has_source_errors
+        and not has_tx_errors
+    ):
         comment_parts.append(
             "\u2705 **No documentation updates needed** - all documentation sections are up to date with code changes!"
         )
@@ -378,18 +393,34 @@ def format_section_update_review_comment(report, commit_info=None, feature_secti
             comment_parts.append(feature_section)
         return "\n".join(comment_parts)
 
-    # 1. Applied / Updated Updates
-    applied = [u for u in report.applied_updates if u.status in ("applied", "updated")]
-    if applied:
-        comment_parts.append(f"### \U0001f4c4 Documentation Updated ({len(applied)} section(s))")
-        comment_parts.append("")
-        for u in applied:
-            file_url = get_docs_file_url(u.doc_path, commit_info)
-            link_str = f"[{u.doc_path}]({file_url})" if file_url else f"`{u.doc_path}`"
+    # 1. Committed Updates (in update mode) or Proposed Updates (in review mode)
+    if review_mode:
+        if applied:
             comment_parts.append(
-                f"- \u2705 **{link_str}** \u2192 Section `{u.section_heading}`: {u.explanation}"
+                f"### \U0001f4dd Proposed Documentation Updates ({len(applied)} section(s))"
             )
-        comment_parts.append("")
+            comment_parts.append("")
+            for u in applied:
+                file_url = get_docs_file_url(u.doc_path, commit_info)
+                link_str = f"[{u.doc_path}]({file_url})" if file_url else f"`{u.doc_path}`"
+                comment_parts.append(
+                    f"- \U0001f4dd **{link_str}** \u2192 Section `{u.section_heading}`: {u.explanation}"
+                )
+            comment_parts.append("")
+    else:
+        # In update mode: Documentation Updated is ONLY shown when files are actually committed (Priority 1)
+        if committed:
+            comment_parts.append(
+                f"### \U0001f4c4 Documentation Updated ({len(committed)} section(s))"
+            )
+            comment_parts.append("")
+            for u in committed:
+                file_url = get_docs_file_url(u.doc_path, commit_info)
+                link_str = f"[{u.doc_path}]({file_url})" if file_url else f"`{u.doc_path}`"
+                comment_parts.append(
+                    f"- \u2705 **{link_str}** \u2192 Section `{u.section_heading}`: {u.explanation}"
+                )
+            comment_parts.append("")
 
     # 2. No Change Required
     no_change = [u for u in report.applied_updates if u.status == "no_change"]
@@ -402,7 +433,7 @@ def format_section_update_review_comment(report, commit_info=None, feature_secti
             )
         comment_parts.append("")
 
-    # 3. Human Review Required
+    # 3. Human Review Required (Priority 5, always visible even if other sections updated)
     if has_review:
         comment_parts.append(
             f"### \u26a0\ufe0f Human Review Required ({len(report.review_required_updates)} item(s))"
@@ -433,25 +464,25 @@ def format_section_update_review_comment(report, commit_info=None, feature_secti
             comment_parts.append(f"- \u26a0\ufe0f `{src_f}`: {clean_err}")
         comment_parts.append("")
 
-    # 5. Rejected Updates (grouped by specific failure types)
+    # 5. Transaction Failures
+    if tx_failed:
+        comment_parts.append(f"### \U0001f6a8 Transaction Failures ({len(tx_failed)} item(s))")
+        comment_parts.append("")
+        for u in tx_failed:
+            comment_parts.append(f"- \U0001f6a8 `{u.doc_path}`: {sanitize_output(u.explanation)}")
+        comment_parts.append("")
+
+    # 6. Rejected Updates (grouped by specific failure types)
     if has_rejected:
-        tx_failed = [u for u in report.rejected_updates if u.status == "transaction_failed"]
         gen_failed = [u for u in report.rejected_updates if u.status == "generation_failed"]
-        source_failed = [u for u in report.rejected_updates if u.status == "source_analysis_failed"]
+        source_failed = [
+            u for u in report.rejected_updates if u.status == "source_analysis_failed"
+        ]
         std_rejected = [
             u
             for u in report.rejected_updates
             if u.status not in ("transaction_failed", "generation_failed", "source_analysis_failed")
         ]
-
-        if tx_failed:
-            comment_parts.append(f"### \U0001f6a8 Transaction Failures ({len(tx_failed)} item(s))")
-            comment_parts.append("")
-            for u in tx_failed:
-                comment_parts.append(
-                    f"- \U0001f6a8 `{u.doc_path}`: {sanitize_output(u.explanation)}"
-                )
-            comment_parts.append("")
 
         if gen_failed:
             comment_parts.append(f"### \U0001f4a5 Generation Failures ({len(gen_failed)} item(s))")
@@ -497,6 +528,11 @@ def format_section_update_review_comment(report, commit_info=None, feature_secti
 
     return "\n".join(comment_parts)
 
+    if feature_section:
+        comment_parts.append(feature_section)
+
+    return "\n".join(comment_parts)
+
 
 def post_review_comment(
     files_with_content,
@@ -505,6 +541,7 @@ def post_review_comment(
     include_full_content=True,
     feature_section="",
     section_report=None,
+    review_mode=False,
 ):
     """
     Post a review comment on the PR with documentation suggestions.
@@ -516,7 +553,10 @@ def post_review_comment(
 
     if section_report is not None:
         comment_body = format_section_update_review_comment(
-            section_report, commit_info=commit_info, feature_section=feature_section
+            section_report,
+            commit_info=commit_info,
+            feature_section=feature_section,
+            review_mode=review_mode,
         )
         # Write to temp file and comment via gh
         temp_file = Path("/tmp/review_comment.md")

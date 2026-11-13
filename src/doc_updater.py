@@ -114,13 +114,19 @@ class AppliedSectionUpdate:
 
 @dataclass
 class DocumentationUpdateReport:
-    """Comprehensive summary of documentation update run."""
+    """Comprehensive summary of documentation update run (Priority 1 & Priority 5)."""
 
     updated_documents: dict[str, str]  # doc_path -> updated markdown text
     applied_updates: list[AppliedSectionUpdate] = field(default_factory=list)
+    candidate_updates: list[AppliedSectionUpdate] = field(default_factory=list)
+    validated_updates: list[AppliedSectionUpdate] = field(default_factory=list)
+    committed_updates: list[AppliedSectionUpdate] = field(default_factory=list)
+    staged_updates: list[str] = field(default_factory=list)
     rejected_updates: list[AppliedSectionUpdate] = field(default_factory=list)
     review_required_updates: list[AppliedSectionUpdate] = field(default_factory=list)
     source_analysis_errors: list[tuple[str, str]] = field(default_factory=list)
+    generation_failures: list[AppliedSectionUpdate] = field(default_factory=list)
+    transaction_failures: list[AppliedSectionUpdate] = field(default_factory=list)
     total_sections_analyzed: int = 0
     total_sections_applied: int = 0
     total_sections_rejected: int = 0
@@ -155,12 +161,25 @@ class PathTraversalSecurityError(DocumentTransactionError):
     pass
 
 
+@dataclass
+class TransactionJournalEntry:
+    dest_path: Path
+    temp_path: Path
+    backup_path: Path | None = None
+    orig_bytes: bytes | None = None
+    orig_mode: int | None = None
+    orig_times: tuple[float, float] | None = None
+    existed: bool = False
+    state: str = "staged"  # "staged", "prepared", "replacing", "replaced", "rolled_back", "rollback_failed"
+
+
 class DocumentTransaction:
     """
     Manages multi-document updates with application-level transactional guarantees.
 
-    Provides staged temporary writes, permission and metadata preservation,
-    and rollback on commit failure.
+    Provides staged temporary writes, pre-replacement journal registration,
+    permission and metadata preservation, rollback on commit failure,
+    and separated cleanup outcome (T7 and T8).
 
     NOTE ON ATOMICITY LIMITATIONS:
     This class provides in-process application-level rollback against Python exceptions,
@@ -171,15 +190,27 @@ class DocumentTransaction:
 
     def __init__(self, docs_root: str | Path):
         self.docs_root = Path(docs_root).resolve()
-        # Records: (dest_path, temp_staged_path, original_bytes, orig_mode, orig_times, existed)
-        self.staged_files: list[
-            tuple[Path, Path, bytes | None, int | None, tuple[float, float] | None, bool]
-        ] = []
-        # Records: (dest_path, backup_path, orig_mode, orig_times)
-        self.backups: list[tuple[Path, Path, int | None, tuple[float, float] | None]] = []
-        # Surviving backups from failed rollbacks that MUST NOT be deleted
+        self.journal: list[TransactionJournalEntry] = []
         self.unrecovered_backups: list[tuple[Path, Path]] = []
+        self.cleanup_warnings: list[tuple[Path, str]] = []
         self.committed = False
+
+    @property
+    def staged_files(
+        self,
+    ) -> list[tuple[Path, Path, bytes | None, int | None, tuple[float, float] | None, bool]]:
+        return [
+            (e.dest_path, e.temp_path, e.orig_bytes, e.orig_mode, e.orig_times, e.existed)
+            for e in self.journal
+        ]
+
+    @property
+    def backups(self) -> list[tuple[Path, Path, int | None, tuple[float, float] | None]]:
+        return [
+            (e.dest_path, e.backup_path, e.orig_mode, e.orig_times)
+            for e in self.journal
+            if e.backup_path is not None
+        ]
 
     def validate_destination_path(self, rel_path: str | Path) -> Path:
         """Validate extension, symlinks, and prevent path traversal."""
@@ -255,84 +286,98 @@ class DocumentTransaction:
                         f"Failed staging document update for '{rel_path}': {write_err}"
                     ) from write_err
 
-                self.staged_files.append(
-                    (dest_path, temp_path, orig_bytes, orig_mode, orig_times, existed)
+                self.journal.append(
+                    TransactionJournalEntry(
+                        dest_path=dest_path,
+                        temp_path=temp_path,
+                        backup_path=None,
+                        orig_bytes=orig_bytes,
+                        orig_mode=orig_mode,
+                        orig_times=orig_times,
+                        existed=existed,
+                        state="staged",
+                    )
                 )
         except Exception:
             self.cleanup()
             raise
 
     def commit(self) -> None:
-        """Apply all staged replacements atomically; roll back all on any failure."""
-        if not self.staged_files:
+        """
+        Apply all staged replacements atomically; roll back all on any failure.
+        Maintains pre-replacement journal registration (T7) and decoupled cleanup (T8).
+        """
+        if not self.journal:
             return
 
-        replaced_records: list[
-            tuple[Path, Path | None, int | None, tuple[float, float] | None]
-        ] = []
         try:
-            for (
-                dest_path,
-                temp_path,
-                orig_bytes,
-                orig_mode,
-                orig_times,
-                existed,
-            ) in self.staged_files:
-                backup_path = None
-                if existed and orig_bytes is not None:
+            # Stage 1: Pre-replacement backup preparation.
+            # ALL backups are created, fsynced, and recorded in the journal BEFORE any replacement.
+            for entry in self.journal:
+                if entry.existed and entry.orig_bytes is not None and entry.backup_path is None:
                     try:
                         bak_fd, bak_path_str = tempfile.mkstemp(
-                            dir=dest_path.parent, prefix=".bak_doc_"
+                            dir=entry.dest_path.parent, prefix=".bak_doc_"
                         )
                         backup_path = Path(bak_path_str)
                         with os.fdopen(bak_fd, "wb") as dst:
-                            dst.write(orig_bytes)
+                            dst.write(entry.orig_bytes)
                             dst.flush()
                             os.fsync(dst.fileno())
-                        if orig_mode is not None:
+                        if entry.orig_mode is not None:
                             try:
-                                os.chmod(backup_path, orig_mode)
+                                os.chmod(backup_path, entry.orig_mode)
                             except OSError:
                                 pass
-                        self.backups.append((dest_path, backup_path, orig_mode, orig_times))
+                        entry.backup_path = backup_path
+                        entry.state = "prepared"
                     except Exception as bak_err:
                         raise DocumentTransactionError(
-                            f"Failed creating backup for '{dest_path}': {bak_err}"
+                            f"Failed creating backup for '{entry.dest_path}': {bak_err}"
                         ) from bak_err
 
-                os.replace(temp_path, dest_path)
-                if orig_mode is not None:
+            # Stage 2: Replacement with pre-replacement state transition.
+            # Entry state is marked 'replacing' BEFORE os.replace so interruption
+            # immediately after os.replace retains knowledge of modified destination (T7).
+            for entry in self.journal:
+                entry.state = "replacing"
+                os.replace(entry.temp_path, entry.dest_path)
+                entry.state = "replaced"
+                if entry.orig_mode is not None:
                     try:
-                        os.chmod(dest_path, orig_mode)
+                        os.chmod(entry.dest_path, entry.orig_mode)
                     except OSError:
                         pass
-                replaced_records.append((dest_path, backup_path, orig_mode, orig_times))
 
             self.committed = True
         except (Exception, BaseException) as commit_err:
-            # ROLLBACK EVERYTHING ALREADY REPLACED
+            # ROLLBACK: Inspect journal in reverse. Any entry in "replacing" or "replaced"
+            # must be restored from its pre-registered backup.
             rollback_failures: list[tuple[Path, Path | None, str]] = []
-            for d_path, b_path, m_orig, t_orig in reversed(replaced_records):
-                try:
-                    if b_path is not None and b_path.exists():
-                        os.replace(b_path, d_path)
-                        if m_orig is not None:
-                            try:
-                                os.chmod(d_path, m_orig)
-                            except OSError:
-                                pass
-                        if t_orig is not None:
-                            try:
-                                os.utime(d_path, t_orig)
-                            except OSError:
-                                pass
-                    elif b_path is None and d_path.exists():
-                        d_path.unlink(missing_ok=True)
-                except (Exception, BaseException) as rb_err:
-                    if b_path is not None and b_path.exists():
-                        self.unrecovered_backups.append((d_path, b_path))
-                    rollback_failures.append((d_path, b_path, str(rb_err)))
+            for entry in reversed(self.journal):
+                if entry.state in ("replacing", "replaced"):
+                    try:
+                        if entry.backup_path is not None and entry.backup_path.exists():
+                            os.replace(entry.backup_path, entry.dest_path)
+                            if entry.orig_mode is not None:
+                                try:
+                                    os.chmod(entry.dest_path, entry.orig_mode)
+                                except OSError:
+                                    pass
+                            if entry.orig_times is not None:
+                                try:
+                                    os.utime(entry.dest_path, entry.orig_times)
+                                except OSError:
+                                    pass
+                            entry.state = "rolled_back"
+                        elif not entry.existed and entry.dest_path.exists():
+                            entry.dest_path.unlink(missing_ok=True)
+                            entry.state = "rolled_back"
+                    except (Exception, BaseException) as rb_err:
+                        entry.state = "rollback_failed"
+                        if entry.backup_path is not None and entry.backup_path.exists():
+                            self.unrecovered_backups.append((entry.dest_path, entry.backup_path))
+                        rollback_failures.append((entry.dest_path, entry.backup_path, str(rb_err)))
 
             if rollback_failures:
                 msg = (
@@ -347,19 +392,47 @@ class DocumentTransaction:
                     f"Transaction commit failed; rolled back all replaced documents successfully: {commit_err}"
                 ) from commit_err
         finally:
-            self.cleanup()
+            # Stage 3: Cleanup. Separate outcome (T8).
+            # Unlink errors do not mask commit success or abort transaction.
+            try:
+                self.cleanup()
+            except Exception as cleanup_err:
+                self.cleanup_warnings.append((Path("all"), str(cleanup_err)))
 
     def cleanup(self) -> None:
-        """Clean up temporary staged files and backups, NEVER unlinking surviving backups from failed rollbacks."""
+        """
+        Clean up temporary staged files and backups, NEVER unlinking surviving backups from failed rollbacks.
+        Captures unlink errors as non-fatal cleanup warnings (T8).
+        """
         unrecovered_baks = {b for _d, b in self.unrecovered_backups}
-        for _dest, temp_path, _bytes, _mode, _times, _existed in self.staged_files:
-            if temp_path.exists():
-                temp_path.unlink(missing_ok=True)
-        for _dest, backup_path, _mode, _times in self.backups:
-            if backup_path not in unrecovered_baks and backup_path.exists():
-                backup_path.unlink(missing_ok=True)
-        self.staged_files.clear()
-        self.backups = [(d, b, m, t) for d, b, m, t in self.backups if b in unrecovered_baks]
+        for entry in self.journal:
+            if entry.temp_path and entry.temp_path.exists():
+                try:
+                    entry.temp_path.unlink(missing_ok=True)
+                except OSError as e:
+                    self.cleanup_warnings.append((entry.temp_path, str(e)))
+            if (
+                entry.backup_path
+                and entry.backup_path not in unrecovered_baks
+                and entry.backup_path.exists()
+                and entry.state != "rollback_failed"
+            ):
+                try:
+                    entry.backup_path.unlink(missing_ok=True)
+                except OSError as e:
+                    self.cleanup_warnings.append((entry.backup_path, str(e)))
+
+    def retry_cleanup(self) -> list[tuple[Path, str]]:
+        """Retry deleting any leftover temporary or backup files that failed cleanup."""
+        remaining: list[tuple[Path, str]] = []
+        for path, _prev_err in self.cleanup_warnings:
+            if path.exists():
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as e:
+                    remaining.append((path, str(e)))
+        self.cleanup_warnings = remaining
+        return list(remaining)
 
 
 def atomic_overwrite_file(
@@ -413,72 +486,185 @@ def is_already_documented(current_content: str, req: SectionUpdateRequest) -> bo
     """
     Check if the current documentation section already accurately reflects
     all technical facts introduced by the AST deltas.
-    Prevents repetitive rewrites from model wording variations (Priority 7, H4).
+    Prevents repetitive rewrites from model wording variations (Priority 4).
+    Uses strict fact-bound matching so numbers/names from unrelated entities
+    do not cause stale documentation to be falsely marked as already documented (D3, D4, D5, D6, D11).
     """
-    if not current_content:
+    if not current_content or not current_content.strip():
         return False
 
-    # 1. If any removed symbol is still mentioned in the current doc, it's not up to date
+    # 1. Removed symbols:
+    # If any removed symbol is still actively mentioned (not deprecated/removed notice),
+    # the documentation is NOT up to date.
     for delta in req.ast_deltas.values():
         for sym in delta.removed_symbols:
             short_name = sym.name.split(".")[-1]
             if re.search(rf"\b{re.escape(short_name)}\b", current_content):
-                return False
+                clauses = re.split(r"[.\n;]", current_content)
+                has_active = False
+                for cl in clauses:
+                    if re.search(rf"\b{re.escape(short_name)}\b", cl):
+                        cl_lower = cl.lower()
+                        is_negated = any(
+                            k in cl_lower
+                            for k in [
+                                "removed",
+                                "deprecated",
+                                "deleted",
+                                "obsolete",
+                                "do not use",
+                                "do not call",
+                                "never use",
+                                "never call",
+                                "replaced with",
+                                "no longer",
+                            ]
+                        )
+                        if not is_negated:
+                            has_active = True
+                            break
+                if has_active:
+                    return False
 
     has_deltas = False
-    # 2. Check added constants: their names and values must be documented
+
+    # 2. Check modified constants (D3, D4, D6, D11):
     for delta in req.ast_deltas.values():
-        if (
-            delta.added_constants
-            or delta.modified_constants
-            or delta.added_symbols
-            or delta.added_parameters
-            or delta.modified_parameters
-        ):
+        for old_c, new_c in delta.modified_constants:
             has_deltas = True
+            c_name = new_c.name.split(".")[-1]
+            old_val = old_c.value.strip().strip("'\"") if old_c.value else None
+            new_val = new_c.value.strip().strip("'\"") if new_c.value else None
 
+            # D3 / D4: If old value is bound to constant name in current doc -> NOT up to date!
+            if old_val:
+                bound_to_old = bool(
+                    re.search(
+                        rf"\b{re.escape(c_name)}\b[^\n\r|:=]*[:=\s|`]+[^\n\r|:=]*\b{re.escape(old_val)}\b",
+                        current_content,
+                        re.IGNORECASE,
+                    )
+                )
+                if bound_to_old:
+                    return False
+
+            # The new value MUST be bound to constant name in current doc
+            if new_val:
+                bound_to_new = bool(
+                    re.search(
+                        rf"\b{re.escape(c_name)}\b[^\n\r|:=]*[:=\s|`]+[^\n\r|:=]*\b{re.escape(new_val)}\b",
+                        current_content,
+                        re.IGNORECASE,
+                    )
+                )
+                if not bound_to_new:
+                    return False
+
+    # 3. Check added constants:
+    for delta in req.ast_deltas.values():
         for c in delta.added_constants:
-            short_name = c.name.split(".")[-1]
-            if not re.search(rf"\b{re.escape(short_name)}\b", current_content):
-                return False
-            if c.value is not None:
-                val_str = c.value.strip().strip("'\"")
-                if val_str and not re.search(rf"\b{re.escape(val_str)}\b", current_content):
+            has_deltas = True
+            c_name = c.name.split(".")[-1]
+            if c.value:
+                val = c.value.strip().strip("'\"")
+                bound = bool(
+                    re.search(
+                        rf"\b{re.escape(c_name)}\b[^\n\r|:=]*[:=\s|`]+[^\n\r|:=]*\b{re.escape(val)}\b",
+                        current_content,
+                        re.IGNORECASE,
+                    )
+                )
+                if not bound:
+                    return False
+            else:
+                if not re.search(rf"\b{re.escape(c_name)}\b", current_content):
                     return False
 
-        # Modified constants: new value must be present
-        for _old_c, new_c in delta.modified_constants:
-            short_name = new_c.name.split(".")[-1]
-            if not re.search(rf"\b{re.escape(short_name)}\b", current_content):
-                return False
-            if new_c.value is not None:
-                val_str = new_c.value.strip().strip("'\"")
-                if val_str and not re.search(rf"\b{re.escape(val_str)}\b", current_content):
+    # 4. Check modified parameters:
+    for delta in req.ast_deltas.values():
+        for _fname, old_p, new_p in delta.modified_parameters:
+            has_deltas = True
+            p_name = new_p.name
+            old_def = old_p.default_value.strip().strip("'\"") if old_p.default_value else None
+            new_def = new_p.default_value.strip().strip("'\"") if new_p.default_value else None
+
+            # If default changed:
+            if old_def and new_def and old_def != new_def:
+                bound_to_old = bool(
+                    re.search(
+                        rf"\b{re.escape(p_name)}\b[^\.\n]*?(?:defaults?\s*(?:is|=|to|:)|default:|\(default\s+|=)\s*`?{re.escape(old_def)}\b",
+                        current_content,
+                        re.IGNORECASE,
+                    )
+                )
+                if bound_to_old:
                     return False
 
-        # Added symbols
+                bound_to_new = bool(
+                    re.search(
+                        rf"\b{re.escape(p_name)}\b[^\.\n]*?(?:defaults?\s*(?:is|=|to|:)|default:|\(default\s+|=)\s*`?{re.escape(new_def)}\b",
+                        current_content,
+                        re.IGNORECASE,
+                    )
+                )
+                if not bound_to_new:
+                    return False
+
+            # If type annotation changed:
+            old_type = old_p.type_annotation.strip() if old_p.type_annotation else None
+            new_type = new_p.type_annotation.strip() if new_p.type_annotation else None
+            if old_type and new_type and old_type != new_type:
+                bound_to_old_t = bool(
+                    re.search(
+                        rf"\b{re.escape(p_name)}\b\s*[:(]\s*{re.escape(old_type)}\b",
+                        current_content,
+                        re.IGNORECASE,
+                    )
+                )
+                if bound_to_old_t:
+                    return False
+
+    # 5. Check modified function return types (D5):
+    for delta in req.ast_deltas.values():
+        for old_s, new_s in delta.modified_symbols:
+            has_deltas = True
+            f_name = new_s.name.split(".")[-1]
+            old_ret = getattr(old_s, "return_type", None) or (
+                old_s.signature.split("->")[-1].strip() if "->" in old_s.signature else None
+            )
+            new_ret = getattr(new_s, "return_type", None) or (
+                new_s.signature.split("->")[-1].strip() if "->" in new_s.signature else None
+            )
+            if old_ret and new_ret and old_ret != new_ret:
+                old_ret_clean = old_ret.strip().strip("'\"")
+                new_ret_clean = new_ret.strip().strip("'\"")
+                bound_to_old = bool(
+                    re.search(
+                        rf"\b{re.escape(f_name)}\b[^\.\n]*?(?:returns|returning|return value is)\s+(?:a\s+)?`?{re.escape(old_ret_clean)}\b",
+                        current_content,
+                        re.IGNORECASE,
+                    )
+                )
+                if bound_to_old:
+                    return False
+
+                bound_to_new = bool(
+                    re.search(
+                        rf"\b{re.escape(f_name)}\b[^\.\n]*?(?:returns|returning|return value is)\s+(?:a\s+)?`?{re.escape(new_ret_clean)}\b",
+                        current_content,
+                        re.IGNORECASE,
+                    )
+                )
+                if not bound_to_new:
+                    return False
+
+    # 6. Check added symbols:
+    for delta in req.ast_deltas.values():
         for sym in delta.added_symbols:
+            has_deltas = True
             short_name = sym.name.split(".")[-1]
             if not re.search(rf"\b{re.escape(short_name)}\b", current_content):
                 return False
-
-        # Added parameters
-        for _fname, p in delta.added_parameters:
-            if not re.search(rf"\b{re.escape(p.name)}\b", current_content):
-                return False
-            if p.default_value is not None:
-                def_str = p.default_value.strip().strip("'\"")
-                if def_str and not re.search(rf"\b{re.escape(def_str)}\b", current_content):
-                    return False
-
-        # Modified parameters
-        for _fname, _old_p, new_p in delta.modified_parameters:
-            if not re.search(rf"\b{re.escape(new_p.name)}\b", current_content):
-                return False
-            if new_p.default_value is not None:
-                def_str = new_p.default_value.strip().strip("'\"")
-                if def_str and not re.search(rf"\b{re.escape(def_str)}\b", current_content):
-                    return False
 
     return has_deltas
 
@@ -583,14 +769,33 @@ You must respond ONLY with a JSON object in this exact format:
 }"""
 
 
-def build_update_prompt(req: SectionUpdateRequest, max_context_chars: int | None = None) -> str:
+def calculate_serialized_request_size(
+    model: str, system_prompt: str, user_prompt: str
+) -> int:
+    """Calculate the exact byte size of the serialized outbound JSON HTTP request body (Priority 7)."""
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"},
+    }
+    return len(json.dumps(payload).encode("utf-8"))
+
+
+def build_update_prompt(
+    req: SectionUpdateRequest,
+    max_context_chars: int | None = None,
+    model: str = "gpt-4o",
+) -> str:
     """
     Construct an evidence-rich prompt for the AI documentation generator.
 
     Applies clear untrusted boundary delimiters, secret redaction,
-    strictly enforces the context budget across the entire model request
-    (including system prompt), and prioritizes the target section and
-    exact changed symbol snippets so essential context is never lost.
+    strictly enforces the context budget across the serialized HTTP request body
+    (Priority 7), and prioritizes the target section and exact changed symbol snippets.
     """
     if max_context_chars is None:
         try:
@@ -600,13 +805,6 @@ def build_update_prompt(req: SectionUpdateRequest, max_context_chars: int | None
         except Exception:
             max_context_chars = 400000
 
-    system_len = len(_SYSTEM_PROMPT)
-    max_user_prompt_chars = max_context_chars - system_len
-    if max_user_prompt_chars <= 500:
-        raise ContextBudgetExceededError(
-            f"Configured MAX_CONTEXT_CHARS ({max_context_chars}) is too small to fit system instructions."
-        )
-
     # 1. Critical: Target Section Content (MUST NOT BE TRUNCATED)
     safe_current_content = redact_secrets(req.current_section_content)
     target_sec_text = (
@@ -615,12 +813,6 @@ def build_update_prompt(req: SectionUpdateRequest, max_context_chars: int | None
         f"{safe_current_content}\n"
         f"</untrusted_current_documentation>\n"
     )
-
-    # Check if target section alone exceeds budget
-    if len(target_sec_text) + 500 > max_user_prompt_chars:
-        raise ContextBudgetExceededError(
-            f"Target section content ({len(safe_current_content):,} chars) exceeds context budget ({max_context_chars:,} chars)."
-        )
 
     # 2. Header and metadata
     header_parts = [
@@ -641,8 +833,15 @@ def build_update_prompt(req: SectionUpdateRequest, max_context_chars: int | None
 
     header_text = "\n".join(header_parts)
 
-    fixed_len = len(header_text) + len(target_sec_text) + 200
-    available_for_other = max_user_prompt_chars - fixed_len
+    # Check if target section and metadata alone exceed serialized budget
+    base_user_prompt = f"{header_text}\n{target_sec_text}"
+    base_bytes = calculate_serialized_request_size(model, _SYSTEM_PROMPT, base_user_prompt)
+    if base_bytes > max_context_chars:
+        raise ContextBudgetExceededError(
+            f"Target section and required metadata ({base_bytes:,} serialized bytes) exceed context budget ({max_context_chars:,} bytes)."
+        )
+
+    available_for_other = max(0, max_context_chars - base_bytes)
     if available_for_other < 200:
         raise ContextBudgetExceededError(
             "Essential metadata and target section leave insufficient context for code evidence."
@@ -660,7 +859,6 @@ def build_update_prompt(req: SectionUpdateRequest, max_context_chars: int | None
     available_for_code = max(100, available_for_other - len(style_text))
 
     # 4. Code changes: prioritize relevant source files and targeted symbol snippets
-    # Filter to source files that contain changed symbols or impact evidence
     relevant_files = []
     for src in req.source_files:
         old_snip = req.old_code_snippets.get(src, "")
@@ -672,7 +870,7 @@ def build_update_prompt(req: SectionUpdateRequest, max_context_chars: int | None
             relevant_files.append(src)
 
     if not relevant_files:
-        relevant_files = req.source_files[:10]  # Fallback to first few files
+        relevant_files = req.source_files[:10]
 
     code_parts = ["\n### Code Changes:"]
     budget_per_file = max(300, (available_for_code - 100) // max(1, len(relevant_files)))
@@ -697,17 +895,29 @@ def build_update_prompt(req: SectionUpdateRequest, max_context_chars: int | None
             )
 
     code_text = "\n".join(code_parts)
-
     full_prompt = f"{header_text}\n{code_text}\n{target_sec_text}{style_text}"
 
-    # Strict final enforcement of total outbound length
-    total_len = system_len + len(full_prompt)
-    if total_len > max_context_chars:
-        # Trim code_text from the end if needed
-        excess = total_len - max_context_chars
-        if len(code_text) > excess + 100:
-            code_text = code_text[: len(code_text) - excess - 50] + "\n# [TRUNCATED CODE EVIDENCE]"
+    # Strict final enforcement of actual serialized HTTP request body size (Priority 7)
+    current_req_size = calculate_serialized_request_size(model, _SYSTEM_PROMPT, full_prompt)
+    if current_req_size > max_context_chars:
+        # Trim code_text until serialized body fits within max_context_chars
+        excess = current_req_size - max_context_chars
+        trim_len = len(code_text) - excess - 150
+        if trim_len > 100:
+            code_text = code_text[:trim_len] + "\n# [TRUNCATED CODE EVIDENCE]"
             full_prompt = f"{header_text}\n{code_text}\n{target_sec_text}{style_text}"
+        else:
+            # Code cannot fit, omit code
+            full_prompt = f"{header_text}\n{target_sec_text}{style_text}"
+
+        # Final verification
+        final_size = calculate_serialized_request_size(model, _SYSTEM_PROMPT, full_prompt)
+        if final_size > max_context_chars:
+            raise ContextBudgetExceededError(
+                f"Request serialized size ({final_size:,} bytes) exceeds context budget ({max_context_chars:,} bytes)."
+            )
+
+    return full_prompt
 
     return full_prompt
 
@@ -826,14 +1036,34 @@ def parse_ai_response(
 
 
 class _CodeFactExtractor(ast.NodeVisitor):
-    """Walks Python AST to extract literals, function details, and environment variables."""
+    """Walks Python AST to extract literals, function details, classes, type aliases, and environment variables."""
 
     def __init__(self):
         self.numeric_literals: set[str] = set()
         self.env_vars: set[str] = set()
+        self.env_defaults: dict[str, str] = {}
         self.func_params: dict[str, set[str]] = {}
+        self.func_param_details: dict[str, dict[str, ParameterInfo]] = {}
         self.func_returns: dict[str, str] = {}
         self.constants: dict[str, str] = {}
+        self.type_aliases: dict[str, str] = {}
+        self.classes: dict[str, list[str]] = {}
+        self.class_methods: dict[str, set[str]] = {}
+        self.current_class: str | None = None
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        bases = []
+        for b in node.bases:
+            if isinstance(b, ast.Name):
+                bases.append(b.id)
+            elif isinstance(b, ast.Attribute):
+                bases.append(b.attr)
+        self.classes[node.name] = bases
+        self.class_methods[node.name] = set()
+        prev_class = self.current_class
+        self.current_class = node.name
+        self.generic_visit(node)
+        self.current_class = prev_class
 
     def visit_Constant(self, node: ast.Constant) -> None:
         if isinstance(node.value, int | float):
@@ -851,9 +1081,37 @@ class _CodeFactExtractor(ast.NodeVisitor):
     def _record_func(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         all_args = node.args.args + node.args.kwonlyargs + getattr(node.args, "posonlyargs", [])
         self.func_params[node.name] = {a.arg for a in all_args}
+        if self.current_class:
+            self.class_methods.setdefault(self.current_class, set()).add(node.name)
+            self.func_params[f"{self.current_class}.{node.name}"] = {a.arg for a in all_args}
+
+        param_dict = {}
+        defaults = [None] * (len(node.args.args) - len(node.args.defaults)) + list(
+            node.args.defaults
+        )
+        for a, d in zip(node.args.args, defaults, strict=False):
+            type_ann = ast.unparse(a.annotation).strip() if a.annotation else None
+            def_val = ast.unparse(d).strip().strip("'\"") if d else None
+            param_dict[a.arg] = ParameterInfo(
+                name=a.arg, type_annotation=type_ann, default_value=def_val
+            )
+        for a, d in zip(node.args.kwonlyargs, node.args.kw_defaults, strict=False):
+            type_ann = ast.unparse(a.annotation).strip() if a.annotation else None
+            def_val = ast.unparse(d).strip().strip("'\"") if d else None
+            param_dict[a.arg] = ParameterInfo(
+                name=a.arg, type_annotation=type_ann, default_value=def_val
+            )
+
+        self.func_param_details[node.name] = param_dict
+        if self.current_class:
+            self.func_param_details[f"{self.current_class}.{node.name}"] = param_dict
+
         if node.returns:
             try:
-                self.func_returns[node.name] = ast.unparse(node.returns).strip()
+                ret_str = ast.unparse(node.returns).strip()
+                self.func_returns[node.name] = ret_str
+                if self.current_class:
+                    self.func_returns[f"{self.current_class}.{node.name}"] = ret_str
             except Exception:
                 pass
 
@@ -861,9 +1119,27 @@ class _CodeFactExtractor(ast.NodeVisitor):
         for target in node.targets:
             if isinstance(target, ast.Name):
                 try:
-                    self.constants[target.id] = ast.unparse(node.value).strip().strip("'\"")
+                    val_str = ast.unparse(node.value).strip().strip("'\"")
+                    self.constants[target.id] = val_str
+                    # Type alias detection (e.g. UserId = int, Payload = dict[str, Any])
+                    if isinstance(node.value, ast.Name):
+                        self.type_aliases[target.id] = node.value.id
+                    elif isinstance(node.value, ast.Subscript):
+                        self.type_aliases[target.id] = ast.unparse(node.value).strip()
                 except Exception:
                     pass
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if isinstance(node.target, ast.Name) and node.value:
+            try:
+                val_str = ast.unparse(node.value).strip().strip("'\"")
+                self.constants[node.target.id] = val_str
+                ann_str = ast.unparse(node.annotation).strip()
+                if "TypeAlias" in ann_str or isinstance(node.value, ast.Name | ast.Subscript):
+                    self.type_aliases[node.target.id] = ast.unparse(node.value).strip()
+            except Exception:
+                pass
         self.generic_visit(node)
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
@@ -882,7 +1158,10 @@ class _CodeFactExtractor(ast.NodeVisitor):
                 and isinstance(node.args[0], ast.Constant)
                 and isinstance(node.args[0].value, str)
             ):
-                self.env_vars.add(node.args[0].value)
+                var_name = node.args[0].value
+                self.env_vars.add(var_name)
+                if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+                    self.env_defaults[var_name] = str(node.args[1].value)
         self.generic_visit(node)
 
 
@@ -1108,7 +1387,7 @@ class DocumentationValidator:
                     f"unsupported_option_or_parameter: option or parameter '{opt}' does not exist in source code"
                 )
 
-        # 9. Parameter Default Value & Type Verification (C1 Case 1 & Priority 2)
+        # 9. Parameter Default Value & Type Verification (C1 Case 1 & Priority 3)
         for p_name, p_info in valid_params.items():
             if p_info.default_value is not None:
                 actual_val = p_info.default_value.strip().strip("'\"")
@@ -1143,25 +1422,34 @@ class DocumentationValidator:
                 type_matches = re.findall(
                     rf"\b{re.escape(p_name)}\s*:\s*([A-Za-z_][A-Za-z0-9_]*)", clean_prop
                 )
-                for claimed_t in type_matches:
-                    c_type = claimed_t.strip()
-                    if c_type in known_types and c_type != actual_type:
-                        failed.append(
-                            f"parameter_type_mismatch: parameter '{p_name}' type is '{actual_type}', but documentation claims '{c_type}'"
-                        )
-
-                paren_matches = re.findall(
+                type_matches += re.findall(
                     rf"\b{re.escape(p_name)}\s*\(([A-Za-z_][A-Za-z0-9_]*)[,\)]",
                     clean_prop,
                 )
-                for claimed_t in paren_matches:
+                for claimed_t in type_matches:
                     c_type = claimed_t.strip()
-                    if c_type in known_types and c_type != actual_type:
-                        failed.append(
-                            f"parameter_type_mismatch: parameter '{p_name}' type is '{actual_type}', but documentation claims '{c_type}'"
-                        )
+                    # Type alias resolution (Priority 3)
+                    alias_actual = fact_extractor.type_aliases.get(actual_type, actual_type)
+                    alias_claimed = fact_extractor.type_aliases.get(c_type, c_type)
+                    matches = (
+                        c_type == actual_type
+                        or alias_actual == c_type
+                        or alias_claimed == actual_type
+                        or alias_actual == alias_claimed
+                    )
+                    if not matches:
+                        if (c_type in known_types or alias_claimed in known_types) and (
+                            actual_type in known_types or alias_actual in known_types
+                        ):
+                            failed.append(
+                                f"parameter_type_mismatch: parameter '{p_name}' type is '{actual_type}', but documentation claims '{c_type}'"
+                            )
+                        else:
+                            review_reasons.append(
+                                f"Unverifiable parameter type: '{p_name}' is documented as '{c_type}' (source: '{actual_type}'); requires human review."
+                            )
 
-        # 9b. Constant Value Verification (Priority 2)
+        # 9b. Constant Value Verification (Priority 2 & Priority 3)
         for c_name, c_info in valid_constants.items():
             if c_info.value is not None:
                 actual_val = c_info.value.strip().strip("'\"")
@@ -1180,8 +1468,115 @@ class DocumentationValidator:
                             f"constant_value_mismatch: constant '{c_name}' value is '{actual_val}', but documentation claims '{clean_claimed}'"
                         )
 
-        # 10. Numeric Claims and Limits Verification (C1 Case 4 & Priority 2)
-        # Specific entity-tied checks:
+        # 10. Entity-Bound Numeric Claims and Limits Verification (Priority 3)
+        # Timeout claims: must strictly match a timeout parameter or constant
+        timeout_claims = re.findall(
+            r"\b(?:timeout|TIMEOUT)\b[^\.\n]*?(?:of|is|=|:)\s*`?([0-9]+(?:\.[0-9]+)?)`?",
+            clean_prop,
+            re.IGNORECASE,
+        )
+        for t_val in timeout_claims:
+            matching_entity = False
+            contradicting_val = None
+            for p_name, p_info in valid_params.items():
+                if "timeout" in p_name.lower() and p_info.default_value:
+                    if values_are_equivalent(t_val, p_info.default_value):
+                        matching_entity = True
+                        break
+                    else:
+                        contradicting_val = p_info.default_value
+            if not matching_entity:
+                for c_name, c_info in valid_constants.items():
+                    if "timeout" in c_name.lower() and c_info.value:
+                        if values_are_equivalent(t_val, c_info.value):
+                            matching_entity = True
+                            break
+                        else:
+                            contradicting_val = c_info.value
+            if not matching_entity:
+                if contradicting_val is not None:
+                    failed.append(
+                        f"timeout_mismatch: source timeout is '{contradicting_val}', but documentation claims '{t_val}' (SLEEP or other constants cannot authorize timeout)"
+                    )
+                else:
+                    review_reasons.append(
+                        f"Unverifiable timeout claim: timeout '{t_val}' does not match any source timeout parameter or constant."
+                    )
+
+        # Rate limit claims: PAGE_SIZE or other constants must not authorize rate limit
+        rate_claims = re.findall(
+            r"(?:rate\s*limit(?:ed)?(?:\s*to)?|requests\s*per\s*(?:second|minute|hour)|rps|rpm)\s*(?:of|is|=|:|to)?\s*`?([0-9]+(?:\.[0-9]+)?)\b`?",
+            clean_prop,
+            re.IGNORECASE,
+        )
+        for r_val in rate_claims:
+            matching_entity = False
+            for p_name, p_info in valid_params.items():
+                if (
+                    any(
+                        k in p_name.lower()
+                        for k in ["rate", "rps", "rpm", "max_req", "request_limit"]
+                    )
+                    and p_info.default_value
+                    and values_are_equivalent(r_val, p_info.default_value)
+                ):
+                    matching_entity = True
+                    break
+            if not matching_entity:
+                for c_name, c_info in valid_constants.items():
+                    if (
+                        any(
+                            k in c_name.lower()
+                            for k in ["rate", "rps", "rpm", "max_req", "request_limit"]
+                        )
+                        and c_info.value
+                        and values_are_equivalent(r_val, c_info.value)
+                    ):
+                        matching_entity = True
+                        break
+            if not matching_entity:
+                failed.append(
+                    f"unsupported_rate_limit: rate limit of '{r_val}' claimed in documentation, but no rate limit entity exists in source (PAGE_SIZE or other constants do not authorize rate limits)"
+                )
+
+        # Retry delay claims: SLEEP must not authorize RETRY_DELAY
+        retry_delay_claims = re.findall(
+            r"\b(?:retry_delay|backoff|retry\s*interval)\b[^\.\n]*?(?:of|is|=|:)\s*`?([0-9]+(?:\.[0-9]+)?)`?",
+            clean_prop,
+            re.IGNORECASE,
+        )
+        for rd_val in retry_delay_claims:
+            matching_entity = False
+            contradicting_val = None
+            for p_name, p_info in valid_params.items():
+                if (
+                    any(k in p_name.lower() for k in ["retry_delay", "backoff", "retry_interval"])
+                    and p_info.default_value
+                ):
+                    if values_are_equivalent(rd_val, p_info.default_value):
+                        matching_entity = True
+                        break
+                    else:
+                        contradicting_val = p_info.default_value
+            if not matching_entity:
+                for c_name, c_info in valid_constants.items():
+                    if (
+                        any(
+                            k in c_name.lower() for k in ["retry_delay", "backoff", "retry_interval"]
+                        )
+                        and c_info.value
+                    ):
+                        if values_are_equivalent(rd_val, c_info.value):
+                            matching_entity = True
+                            break
+                        else:
+                            contradicting_val = c_info.value
+            if not matching_entity:
+                failed.append(
+                    f"unsupported_retry_delay: retry delay '{rd_val}' claimed in documentation does not match retry delay parameters or constants (SLEEP does not authorize RETRY_DELAY)"
+                )
+
+        # Retry count claims
         retry_claims = re.findall(
             r"\b(?:retries|max_retries)\b[^\.\n]*?(?:of|is|=|:)\s*`?([0-9]+(?:\.[0-9]+)?)`?",
             clean_prop,
@@ -1211,101 +1606,32 @@ class DocumentationValidator:
                     f"unsupported_numeric_claim: retries value '{r_val}' does not match retry constants or parameters"
                 )
 
-        timeout_claims = re.findall(
-            r"\btimeout\b[^\.\n]*?(?:of|is|=|:)\s*`?([0-9]+(?:\.[0-9]+)?)`?",
-            clean_prop,
-            re.IGNORECASE,
-        )
-        for t_val in timeout_claims:
-            matching_entity = False
-            for p_name, p_info in valid_params.items():
-                if (
-                    "timeout" in p_name.lower()
-                    and p_info.default_value
-                    and values_are_equivalent(t_val, p_info.default_value)
-                ):
-                    matching_entity = True
-                    break
-            if not matching_entity:
-                for c_name, c_info in valid_constants.items():
-                    if (
-                        "timeout" in c_name.lower()
-                        and c_info.value
-                        and values_are_equivalent(t_val, c_info.value)
-                    ):
-                        matching_entity = True
-                        break
-            if not matching_entity:
-                failed.append(
-                    f"unsupported_numeric_claim: timeout value '{t_val}' does not match timeout constants or parameters"
-                )
-        # Entity-tied evidence: limits, timeouts, retries, and rates must match exact parameters or constants.
-        valid_numeric_values: set[str] = set()
-        for p_info in valid_params.values():
-            if p_info.default_value is not None:
-                v = p_info.default_value.strip().strip("'\"")
-                valid_numeric_values.add(v)
-                try:
-                    valid_numeric_values.add(str(int(float(v))))
-                except (ValueError, TypeError):
-                    pass
-        for c_info in valid_constants.values():
-            if c_info.value is not None:
-                v = c_info.value.strip().strip("'\"")
-                valid_numeric_values.add(v)
-                try:
-                    valid_numeric_values.add(str(int(float(v))))
-                except (ValueError, TypeError):
-                    pass
-
-        # Also add numbers explicitly defined in AST deltas for changed symbols
-        for d in req.ast_deltas.values():
-            for c in d.added_constants + [nc for _oc, nc in d.modified_constants]:
-                if c.value:
-                    v = c.value.strip().strip("'\"")
-                    valid_numeric_values.add(v)
-                    try:
-                        valid_numeric_values.add(str(int(float(v))))
-                    except (ValueError, TypeError):
-                        pass
-
-        num_claims = re.findall(
-            r"(?:rate\s*limit(?:ed)?(?:\s*to)?|timeout\s*(?:of|is|=|:)?|default\s*(?:of|is|=|:)?|retries\s*(?:of|is|=|:)?|limit(?:ed)?(?:\s*to)?)\s*`?([0-9]+(?:\.[0-9]+)?)\b`?",
-            clean_prop,
-            re.IGNORECASE,
-        )
-        num_claims += re.findall(
-            r"\b([0-9]+)\s*(?:requests|seconds|minutes|retries|items|nodes|connections|workers)\b",
-            clean_prop,
-            re.IGNORECASE,
-        )
-
-        for num_str in num_claims:
-            is_valid_num = any(values_are_equivalent(num_str, vn) for vn in valid_numeric_values)
-            if not is_valid_num:
-                failed.append(
-                    f"unsupported_numeric_claim: numeric value '{num_str}' is claimed in documentation but does not exist in relevant source constants, parameters, or limits"
-                )
-
-        # 11. Return Type Verification (C1 Case 5)
+        # 11. Return Type Verification (C1 Case 5 & Priority 3)
         for f_name, ret_type in fact_extractor.func_returns.items():
             if ret_type:
-                # If proposed doc claims return type for this function
                 ret_matches = re.findall(
                     rf"\b{re.escape(f_name)}\b[^\.\n]*?(?:returns|returning|return value is)\s+(?:a\s+)?([A-Za-z_][A-Za-z0-9_\[\], ]*)",
                     clean_prop,
                     re.IGNORECASE,
                 )
                 for claimed_ret in ret_matches:
-                    c_ret = claimed_ret.strip().lower()
-                    if (("list" in c_ret or "str" in c_ret) and ret_type == "int") or (
-                        ("int" in c_ret or "number" in c_ret) and "str" in ret_type
-                    ):
+                    c_ret = claimed_ret.strip().strip("'\"")
+                    alias_actual = fact_extractor.type_aliases.get(ret_type, ret_type)
+                    alias_claimed = fact_extractor.type_aliases.get(c_ret, c_ret)
+                    matches = (
+                        c_ret == ret_type
+                        or alias_actual == c_ret
+                        or alias_claimed == ret_type
+                        or alias_actual == alias_claimed
+                        or c_ret.lower() in ret_type.lower()
+                        or ret_type.lower() in c_ret.lower()
+                    )
+                    if not matches:
                         failed.append(
                             f"return_type_mismatch: function '{f_name}' returns '{ret_type}', but documentation claims '{claimed_ret.strip()}'"
                         )
 
-        # 12. Environment Variables Verification (C1 Case 6)
+        # 12. Environment Variables Verification (C1 Case 6 & Priority 3)
         env_candidates = re.findall(
             r"\b([A-Z][A-Z0-9_]{2,}(?:_KEY|_TOKEN|_URL|_PORT|_TIMEOUT|_CONFIG|_ENV|_DIR|_PATH|_SECRET|_ID|_HOST))\b",
             clean_prop,
@@ -1318,11 +1644,17 @@ class DocumentationValidator:
                 and env_name not in req.changed_symbols
                 and env_name not in clean_orig
             ):
-                failed.append(
-                    f"unsupported_environment_variable: '{env_name}' is mentioned in documentation but is not defined or accessed in source code"
-                )
+                # Standard external environment variables route to human review
+                if env_name in {"PATH", "HOME", "PYTHONPATH", "CI", "AWS_REGION", "GITHUB_TOKEN"}:
+                    review_reasons.append(
+                        f"External environment variable '{env_name}' referenced; requires human review."
+                    )
+                else:
+                    failed.append(
+                        f"unsupported_environment_variable: '{env_name}' is mentioned in documentation but is not defined or accessed in source code"
+                    )
 
-        # 13. Removed Symbols Verification (Priority 5, C3)
+        # 13. Removed Symbols & Negated/Historical Notices (Priority 3 & Priority 5)
         removed_symbols: list[SymbolInfo] = []
         for delta in req.ast_deltas.values():
             removed_symbols.extend(delta.removed_symbols)
@@ -1336,42 +1668,53 @@ class DocumentationValidator:
                         cl = clause.strip()
                         cl_lower = cl.lower()
 
-                        active_verbs = [
-                            "call",
-                            "use",
-                            "invoke",
-                            "run",
-                            "execute",
-                            "import",
-                            "call on",
+                        # Explicitly negated notices or deprecation statements are VALID (Priority 3)
+                        negated_phrases = [
+                            "do not call",
+                            "do not use",
+                            "do not invoke",
+                            "never call",
+                            "never use",
+                            "never invoke",
+                            "avoid calling",
+                            "avoid using",
+                            "must not call",
+                            "must not use",
+                            "should not call",
+                            "should not use",
+                            "no longer call",
+                            "no longer use",
+                            "no longer supported",
+                            "removed",
+                            "deleted",
+                            "dropped",
+                            "obsolete",
+                            "deprecated",
+                            "replace",
+                            "replaced",
                         ]
-                        starts_with_active = any(
+                        is_negated_or_notice = any(
+                            re.search(rf"\b{re.escape(np)}\b", cl_lower) for np in negated_phrases
+                        )
+
+                        if is_negated_or_notice:
+                            # Valid historical / warning statement!
+                            continue
+
+                        # If actively called or instructed without negation -> fail!
+                        is_active_call = bool(re.search(rf"\b{re.escape(short_name)}\s*\(", cl))
+                        active_verbs = ["call", "use", "invoke", "run", "execute", "import"]
+                        has_active_verb = any(
                             re.search(rf"\b{v}\b.*?\b{re.escape(short_name)}\b", cl_lower)
                             for v in active_verbs
                         )
-                        is_not_deprecated = (
-                            "not deprecated" in cl_lower or "isn't deprecated" in cl_lower
-                        )
-                        is_active_call = bool(re.search(rf"\b{re.escape(short_name)}\s*\(", cl))
 
-                        if starts_with_active or is_not_deprecated or is_active_call:
+                        if is_active_call or has_active_verb:
                             failed.append(
                                 f"active_reference_to_removed_symbol: '{short_name}' was removed from source code but is actively instructed or used in '{cl}'"
                             )
                             break
-
-                        is_removal = any(
-                            kw in cl_lower for kw in ["removed", "deleted", "dropped", "obsolete"]
-                        )
-                        is_deprecation = "deprecated" in cl_lower and not is_not_deprecated
-                        is_replacement = bool(
-                            re.search(
-                                rf"\breplace\b.*?\b{re.escape(short_name)}\b.*?\bwith\b\s+`?([A-Za-z_][A-Za-z0-9_]*)`?",
-                                cl_lower,
-                            )
-                        )
-
-                        if not (is_removal or is_deprecation or is_replacement):
+                        else:
                             failed.append(
                                 f"unsupported_reference_to_removed_symbol: '{short_name}' was removed; references must be explicit removal, deprecation, or replacement notices."
                             )
@@ -1597,6 +1940,17 @@ class DocumentationUpdater:
                 user_prompt = build_update_prompt(req)
                 raw_ai_out = self.ai_generator(_SYSTEM_PROMPT, user_prompt)
                 ai_resp = parse_ai_response(raw_ai_out, doc_path, target.section_id)
+                cand_rec = AppliedSectionUpdate(
+                    doc_path=doc_path,
+                    section_id=target.section_id,
+                    section_heading=target.section_heading,
+                    status="candidate",
+                    original_section_content=current_section_content,
+                    new_section_content=ai_resp.proposed_content,
+                    explanation=ai_resp.explanation or "Generated candidate update.",
+                    validation=ValidationResult(is_valid=True),
+                )
+                report.candidate_updates.append(cand_rec)
             except ContextBudgetExceededError as budget_err:
                 applied_rec = AppliedSectionUpdate(
                     doc_path=doc_path,
@@ -1628,6 +1982,7 @@ class DocumentationUpdater:
                         failed_checks=[f"ai_generation_error: {gen_err}"],
                     ),
                 )
+                report.generation_failures.append(applied_rec)
                 report.rejected_updates.append(applied_rec)
                 report.total_sections_rejected += 1
                 continue
@@ -1719,6 +2074,17 @@ class DocumentationUpdater:
                 continue
 
             # Stage valid section patch for multi-document all-or-nothing commit
+            validated_rec = AppliedSectionUpdate(
+                doc_path=doc_path,
+                section_id=target.section_id,
+                section_heading=target.section_heading,
+                status="validated",
+                original_section_content=current_section_content,
+                new_section_content=ai_resp.proposed_content,
+                explanation=ai_resp.explanation or "Validated section update.",
+                validation=val_result,
+            )
+            report.validated_updates.append(validated_rec)
             pending_section_patches.append(
                 (
                     doc_path,
@@ -1789,6 +2155,8 @@ class DocumentationUpdater:
                         )
 
                 report.updated_documents[doc_path] = updated_markdown
+                if doc_path not in report.staged_updates:
+                    report.staged_updates.append(doc_path)
                 applied_rec = AppliedSectionUpdate(
                     doc_path=doc_path,
                     section_id=sec_id,

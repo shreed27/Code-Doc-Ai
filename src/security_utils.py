@@ -115,13 +115,20 @@ def redact_secrets(text: str) -> str:
         text,
     )
 
-    # 9. Authorization headers
+    # 9. Authorization headers and dictionary fields
     text = re.sub(
-        r"(?i)\b(Authorization:\s*(?:Bearer|Basic)\s+)[A-Za-z0-9._~+/-]{10,}\b",
-        r"\1[REDACTED_TOKEN]",
+        r"(?i)(['\"]?Authorization['\"]?\s*:\s*['\"]?(?:Bearer|Basic)\s+)[A-Za-z0-9._~+/-]{10,}(['\"]?)",
+        r"\1[REDACTED_TOKEN]\2",
         text,
     )
-    text = re.sub(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]{16,}\b", r"\1[REDACTED_TOKEN]", text)
+    text = re.sub(
+        r"(?i)(['\"]?Authorization['\"]?\s*:\s*['\"])Basic\s+[A-Za-z0-9+/=]{6,}(['\"])",
+        r"\1Basic [REDACTED_TOKEN]\2",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]{16,}\b", r"\1[REDACTED_TOKEN]", text
+    )
 
     # 10. Private key blocks
     text = re.sub(
@@ -130,22 +137,34 @@ def redact_secrets(text: str) -> str:
         text,
     )
 
-    # 11. Prefixed / variable-name secret assignments (e.g. MY_API_KEY, DB_PASSWORD, CLIENT_SECRET)
-    text = re.sub(
-        r"(?i)\b([A-Za-z0-9_]*(?:API_KEY|SECRET|PASSWORD|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|BEARER_TOKEN|CLIENT_SECRET)[A-Za-z0-9_]*\s*[:=]\s*['\"])[^'\"]+(['\"])",
-        r"\1[REDACTED]\2",
-        text,
+    # 11. Context-aware secret assignments (YAML, JSON, Python, Shell, .env, prose, headers)
+    # Matches keys like client_secret, DB_PASSWORD, password, api_key, X-API-Key, etc.
+    secret_key_re = re.compile(
+        r"(?i)(?:^|[\s,;{(])((?:export\s+)?['\"]?([A-Za-z0-9_.-]*(?:API[_-]?KEY|SECRET|PASSWORD|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|AUTH[_-]?TOKEN|BEARER[_-]?TOKEN|CLIENT[_-]?SECRET)[A-Za-z0-9_.-]*)['\"]?\s*[:=]\s*)(?:(['\"])([^'\"\n\r]+)(['\"])|([^\s,;'\"}{\][#\n\r]+))"
     )
-    text = re.sub(
-        r"(?i)(['\"][A-Za-z0-9_]*(?:API_KEY|SECRET|PASSWORD|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|BEARER_TOKEN|CLIENT_SECRET)[A-Za-z0-9_]*['\"]\s*:\s*['\"])[^'\"]+(['\"])",
-        r"\1[REDACTED]\2",
-        text,
-    )
-    text = re.sub(
-        r"(?i)\b(export\s+[A-Za-z0-9_]*(?:API_KEY|SECRET|PASSWORD|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|BEARER_TOKEN|CLIENT_SECRET)[A-Za-z0-9_]*=)[^\s;&\"']+\b",
-        r"\1[REDACTED]",
-        text,
-    )
+
+    def _replace_secret_assignment(match: re.Match) -> str:
+        prefix = match.group(1)
+        # If quoted
+        if match.group(3) and match.group(5):
+            q1 = match.group(3)
+            val = match.group(4)
+            q2 = match.group(5)
+            if val.startswith("[REDACTED"):
+                return match.group(0)
+            leading = match.group(0)[: match.start(1) - match.start(0)]
+            return f"{leading}{prefix}{q1}[REDACTED]{q2}"
+        # If unquoted
+        val = match.group(6)
+        if not val or val.startswith("[REDACTED"):
+            return match.group(0)
+        # Avoid redacting boolean/null types or common non-secret code tokens
+        if val.lower() in ("null", "none", "true", "false", "str", "int", "bool"):
+            return match.group(0)
+        leading = match.group(0)[: match.start(1) - match.start(0)]
+        return f"{leading}{prefix}[REDACTED]"
+
+    text = secret_key_re.sub(_replace_secret_assignment, text)
 
     # 12. Sanitize active environment variables
     return sanitize_output(text)

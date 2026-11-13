@@ -356,14 +356,52 @@ def main():
     # If the diff alone takes 90%+ of the budget, there's not enough room.
     diff_ratio = len(diff) / budget
     if diff_ratio > 0.9:
-        print(
-            f"Error: Diff is too large ({len(diff):,} chars) for the context budget ({budget:,} chars). "
+        err_msg = (
+            f"Diff is too large ({len(diff):,} chars) for the context budget ({budget:,} chars). "
             f"The diff uses {diff_ratio:.0%} of the budget, leaving insufficient room for documentation content."
         )
+        print(f"Error: {err_msg}")
         print("Options:")
         print(f"  - Increase MAX_CONTEXT_CHARS (current: {budget:,})")
         print("  - Split the PR into smaller changes")
-        return
+
+        commit_info = get_commit_info()
+        pr_number = os.environ.get("PR_NUMBER", "unknown")
+        if (review_mode or update_mode or feature_mode) and not args.dry_run:
+            from doc_updater import AppliedSectionUpdate, DocumentationUpdateReport, ValidationResult
+
+            oversized_rec = AppliedSectionUpdate(
+                doc_path="all_documents",
+                section_id="context_budget",
+                section_heading="Context Budget Exceeded",
+                status="review_required",
+                original_section_content="",
+                new_section_content="",
+                explanation=err_msg,
+                validation=ValidationResult(
+                    is_valid=False,
+                    requires_human_review=True,
+                    review_reasons=[
+                        f"Diff size ({len(diff):,} chars) exceeds 90% of configured context budget ({budget:,} chars). "
+                        "Manual review or increasing MAX_CONTEXT_CHARS is required."
+                    ],
+                ),
+            )
+            rep = DocumentationUpdateReport(
+                updated_documents={},
+                review_required_updates=[oversized_rec],
+                total_sections_analyzed=1,
+            )
+            post_review_comment(
+                [],
+                pr_number,
+                commit_info,
+                include_full_content=False,
+                feature_section=feature_section,
+                section_report=rep,
+                review_mode=review_mode and not update_mode,
+            )
+        sys.exit(1)
 
     # Get commit info before switching to docs repo
     commit_info = get_commit_info()
