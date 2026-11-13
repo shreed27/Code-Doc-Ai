@@ -138,7 +138,9 @@ class TestSecretRedactionPatterns:
         assert "X-API-Key: [REDACTED]" in redacted_header
 
         # 6. Dictionary-style "Authorization": "Basic ..."
-        dict_text = '{"Authorization": "Basic dXNlcjpwYXNzMTIzNDU2", "Content-Type": "application/json"}'
+        dict_text = (
+            '{"Authorization": "Basic dXNlcjpwYXNzMTIzNDU2", "Content-Type": "application/json"}'
+        )
         redacted_dict = redact_secrets(dict_text)
         assert "dXNlcjpwYXNzMTIzNDU2" not in redacted_dict
         assert "[REDACTED_TOKEN]" in redacted_dict

@@ -10,8 +10,8 @@ Covers:
 from comments import format_section_update_review_comment
 from doc_updater import (
     AppliedSectionUpdate,
-    DocumentationUpdateReport,
     DocumentationUpdater,
+    DocumentationUpdateReport,
     ValidationResult,
 )
 

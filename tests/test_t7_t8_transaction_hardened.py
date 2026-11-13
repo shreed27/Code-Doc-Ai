@@ -17,19 +17,20 @@ T8: Cleanup failure after successful commit:
 
 import os
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from doc_updater import (
+    DocumentationUpdater,
     DocumentTransaction,
     DocumentTransactionError,
-    DocumentationUpdater,
 )
 
 
 class TestT7T8TransactionHardened:
-    def test_t7_interruption_immediately_after_os_replace_restores_from_backup(self, tmp_path, monkeypatch):
+    def test_t7_interruption_immediately_after_os_replace_restores_from_backup(
+        self, tmp_path, monkeypatch
+    ):
         """
         T7: Interruption immediately after os.replace returns for doc1.
         Entry state was pre-registered as 'replacing'.
@@ -71,7 +72,9 @@ class TestT7T8TransactionHardened:
         assert doc1.read_text(encoding="utf-8") == "# Doc 1\nOriginal 1\n"
         assert doc2.read_text(encoding="utf-8") == "# Doc 2\nOriginal 2\n"
 
-    def test_t7_interruption_with_failed_rollback_preserves_backup_on_disk(self, tmp_path, monkeypatch):
+    def test_t7_interruption_with_failed_rollback_preserves_backup_on_disk(
+        self, tmp_path, monkeypatch
+    ):
         """
         T7 with failed rollback:
         If rollback also fails, the backup file MUST remain on disk for manual recovery

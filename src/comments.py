@@ -475,9 +475,7 @@ def format_section_update_review_comment(
     # 6. Rejected Updates (grouped by specific failure types)
     if has_rejected:
         gen_failed = [u for u in report.rejected_updates if u.status == "generation_failed"]
-        source_failed = [
-            u for u in report.rejected_updates if u.status == "source_analysis_failed"
-        ]
+        source_failed = [u for u in report.rejected_updates if u.status == "source_analysis_failed"]
         std_rejected = [
             u
             for u in report.rejected_updates

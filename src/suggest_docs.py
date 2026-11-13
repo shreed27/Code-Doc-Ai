@@ -16,7 +16,6 @@ All business logic lives in dedicated modules:
 """
 
 import argparse
-import difflib
 import json
 import os
 import re
@@ -368,7 +367,11 @@ def main():
         commit_info = get_commit_info()
         pr_number = os.environ.get("PR_NUMBER", "unknown")
         if (review_mode or update_mode or feature_mode) and not args.dry_run:
-            from doc_updater import AppliedSectionUpdate, DocumentationUpdateReport, ValidationResult
+            from doc_updater import (
+                AppliedSectionUpdate,
+                DocumentationUpdateReport,
+                ValidationResult,
+            )
 
             oversized_rec = AppliedSectionUpdate(
                 doc_path="all_documents",
@@ -498,7 +501,6 @@ def main():
     is_fork = False
     push_failed = False
     docs_pr_url = None
-    docs_pr_failed = False
     docs_branch = None
     pr_branch_info = None
     if (update_mode or review_mode) and docs_subfolder:
@@ -836,7 +838,7 @@ def main():
                             pr_number, docs_branch, docs_files, gh_token
                         )
                         if docs_pr_url is None:
-                            docs_pr_failed = True
+                            push_failed = True
                     else:
                         pr_branch, pr_repo_url, _ = pr_branch_info or _resolve_pr_push_target(
                             pr_number

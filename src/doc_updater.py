@@ -170,7 +170,9 @@ class TransactionJournalEntry:
     orig_mode: int | None = None
     orig_times: tuple[float, float] | None = None
     existed: bool = False
-    state: str = "staged"  # "staged", "prepared", "replacing", "replaced", "rolled_back", "rollback_failed"
+    state: str = (
+        "staged"  # "staged", "prepared", "replacing", "replaced", "rolled_back", "rollback_failed"
+    )
 
 
 class DocumentTransaction:
@@ -776,9 +778,7 @@ You must respond ONLY with a JSON object in this exact format:
 }"""
 
 
-def calculate_serialized_request_size(
-    model: str, system_prompt: str, user_prompt: str
-) -> int:
+def calculate_serialized_request_size(model: str, system_prompt: str, user_prompt: str) -> int:
     """Calculate the exact byte size of the serialized outbound JSON HTTP request body (Priority 7)."""
     payload = {
         "model": model,
@@ -1567,7 +1567,8 @@ class DocumentationValidator:
                 for c_name, c_info in valid_constants.items():
                     if (
                         any(
-                            k in c_name.lower() for k in ["retry_delay", "backoff", "retry_interval"]
+                            k in c_name.lower()
+                            for k in ["retry_delay", "backoff", "retry_interval"]
                         )
                         and c_info.value
                     ):

@@ -12,14 +12,12 @@ Tests:
 4. Review-only run produces human-review comment with 0 updates.
 """
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 from comments import format_section_update_review_comment
 from doc_updater import (
     AppliedSectionUpdate,
-    DocumentationUpdateReport,
     DocumentationUpdater,
+    DocumentationUpdateReport,
     ValidationResult,
 )
 

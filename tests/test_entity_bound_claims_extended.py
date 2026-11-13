@@ -22,8 +22,6 @@ E3: Explicitly negated active instruction ("Never pass None to connect()") accep
 
 import json
 
-import pytest
-
 from doc_updater import DocumentationUpdater
 
 
@@ -55,7 +53,11 @@ class TestEntityBoundClaimsExtended:
         )
         assert report.total_sections_applied == 0
         assert report.total_sections_rejected >= 1
-        assert any("timeout mismatch" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+        assert any(
+            "timeout mismatch" in f
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
+        )
 
     def test_a2_page_size_cannot_authorize_rate_limit(self):
         """A2: PAGE_SIZE = 500 must not authorize a 500-request rate limit."""
@@ -77,7 +79,11 @@ class TestEntityBoundClaimsExtended:
         )
         assert report.total_sections_applied == 0
         assert report.total_sections_rejected >= 1
-        assert any("rate limit of '500' claimed" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+        assert any(
+            "rate limit of '500' claimed" in f
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
+        )
 
     def test_a3_sleep_cannot_authorize_retry_delay(self):
         """A3: SLEEP = 45 must not authorize a RETRY_DELAY of 45."""
@@ -99,7 +105,11 @@ class TestEntityBoundClaimsExtended:
         )
         assert report.total_sections_applied == 0
         assert report.total_sections_rejected >= 1
-        assert any("retry delay '45' claimed" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+        assert any(
+            "retry delay '45' claimed" in f
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
+        )
 
     def test_a4_parameter_type_mismatch_with_another_parameter(self):
         """A4: Parameter x: int cannot be documented as x: str even though y: str exists."""
@@ -121,7 +131,11 @@ class TestEntityBoundClaimsExtended:
         )
         assert report.total_sections_applied == 0
         assert report.total_sections_rejected >= 1
-        assert any("parameter_type_mismatch" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+        assert any(
+            "parameter_type_mismatch" in f
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
+        )
 
     def test_a5_return_type_mismatch_rejected(self):
         """A5: def get_count() -> int: doc claiming it returns a string is rejected."""
@@ -143,11 +157,15 @@ class TestEntityBoundClaimsExtended:
         )
         assert report.total_sections_applied == 0
         assert report.total_sections_rejected >= 1
-        assert any("return_type_mismatch" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+        assert any(
+            "return_type_mismatch" in f
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
+        )
 
     def test_a6_unsupported_environment_variable_rejected(self):
         """A6: Code has DATABASE_URL, doc claiming SECRET_API_KEY is rejected."""
-        old_code = 'import os\ndef get_db(): return None'
+        old_code = "import os\ndef get_db(): return None"
         new_code = 'import os\ndef get_db(): return os.getenv("DATABASE_URL")'
         doc = "# Config\n\n## Env\nCall `get_db()`: Environment variables."
 
@@ -165,7 +183,11 @@ class TestEntityBoundClaimsExtended:
         )
         assert report.total_sections_applied == 0
         assert report.total_sections_rejected >= 1
-        assert any("unsupported_environment_variable" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+        assert any(
+            "unsupported_environment_variable" in f
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
+        )
 
     def test_a7_removed_symbol_negated_vs_active(self):
         """A7: Removed symbol in negated statement accepted; active instruction rejected."""
@@ -254,7 +276,11 @@ def get_user(user_id: UserId): pass
         )
         assert report.total_sections_applied == 0
         assert report.total_sections_rejected >= 1
-        assert any("parameter_default_mismatch" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+        assert any(
+            "parameter_default_mismatch" in f
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
+        )
 
     def test_e2_unverifiable_claim_routes_to_human_review(self):
         """E2: Unverifiable external dependency claim routes to review_required, not silently accepted."""
@@ -266,7 +292,9 @@ def get_user(user_id: UserId): pass
             {
                 "proposed_content": "Call `sync(force)`. The sync operation depends on third-party Redis server version 7.0.",
                 "explanation": "Unverifiable third-party claim",
-                "uncertainties": ["External Redis version requirements cannot be verified from local AST"],
+                "uncertainties": [
+                    "External Redis version requirements cannot be verified from local AST"
+                ],
                 "requires_human_review": True,
                 "review_reason": "External dependency on Redis 7.0 requires human verification.",
             }
@@ -279,7 +307,9 @@ def get_user(user_id: UserId): pass
         assert report.total_sections_applied == 0
         assert len(report.review_required_updates) >= 1
         assert report.review_required_updates[0].status == "review_required"
-        assert any("Redis" in r for r in report.review_required_updates[0].validation.review_reasons)
+        assert any(
+            "Redis" in r for r in report.review_required_updates[0].validation.review_reasons
+        )
 
     def test_e3_explicitly_negated_instruction_accepted(self):
         """E3: Explicitly negated active instruction ('Never pass None to connect') accepted."""

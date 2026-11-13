@@ -126,9 +126,7 @@ def redact_secrets(text: str) -> str:
         r"\1Basic [REDACTED_TOKEN]\2",
         text,
     )
-    text = re.sub(
-        r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]{16,}\b", r"\1[REDACTED_TOKEN]", text
-    )
+    text = re.sub(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]{16,}\b", r"\1[REDACTED_TOKEN]", text)
 
     # 10. Private key blocks
     text = re.sub(

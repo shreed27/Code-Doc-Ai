@@ -115,9 +115,15 @@ class TestContextBudgetEnforcement:
 
         # Construct code snippets that, when combined with target doc and JSON escaping,
         # would produce ~61,668 bytes if unconstrained.
-        doc_content = "# Section\n" + ("Paragraph with quotes \"and\" newlines \\ and symbols.\n" * 300)
-        old_code = "def worker():\n" + ("    x = 'some string with \"quotes\" and \\escapes\\'\n" * 400)
-        new_code = "def worker(flag: bool = True):\n" + ("    x = 'some string with \"quotes\" and \\escapes\\'\n" * 400)
+        doc_content = "# Section\n" + (
+            'Paragraph with quotes "and" newlines \\ and symbols.\n' * 300
+        )
+        old_code = "def worker():\n" + (
+            "    x = 'some string with \"quotes\" and \\escapes\\'\n" * 400
+        )
+        new_code = "def worker(flag: bool = True):\n" + (
+            "    x = 'some string with \"quotes\" and \\escapes\\'\n" * 400
+        )
 
         req = SectionUpdateRequest(
             doc_path="doc.md",
@@ -149,12 +155,21 @@ class TestContextBudgetEnforcement:
         Must post a visible PR comment reporting review_required and exit with code 1.
         """
         import sys
+
         import suggest_docs
 
         monkeypatch.setenv("MAX_CONTEXT_CHARS", "12000")
         monkeypatch.setenv("PR_NUMBER", "42")
-        monkeypatch.setattr(suggest_docs, "get_git_diff", lambda *args, **kwargs: "+" * 11000)
-        monkeypatch.setattr(suggest_docs, "get_commit_info", lambda *args, **kwargs: {"short_hash": "1234567", "repo_url": "https://github.com/org/repo", "pr_url": "https://github.com/org/repo/pull/42"})
+        monkeypatch.setattr(suggest_docs, "get_diff", lambda *args, **kwargs: "+" * 11000)
+        monkeypatch.setattr(
+            suggest_docs,
+            "get_commit_info",
+            lambda *args, **kwargs: {
+                "short_hash": "1234567",
+                "repo_url": "https://github.com/org/repo",
+                "pr_url": "https://github.com/org/repo/pull/42",
+            },
+        )
 
         posted_comments = []
 
@@ -164,7 +179,8 @@ class TestContextBudgetEnforcement:
 
         monkeypatch.setattr(suggest_docs, "post_review_comment", mock_post_review_comment)
 
-        test_args = ["suggest_docs.py", "--review-mode"]
+        monkeypatch.setenv("COMMENT_BODY", "[review-docs]")
+        test_args = ["suggest_docs.py"]
         monkeypatch.setattr(sys, "argv", test_args)
 
         with pytest.raises(SystemExit) as exc_info:
