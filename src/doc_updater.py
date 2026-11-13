@@ -717,7 +717,24 @@ class DocumentationUpdater:
         # 1. Compute AST deltas
         deltas: dict[str, ASTDelta] = {}
         for src_path, (old_src, new_src) in code_changes.items():
-            deltas[src_path] = compute_ast_delta(old_src, new_src, file_path=src_path)
+            delta = compute_ast_delta(old_src, new_src, file_path=src_path)
+            deltas[src_path] = delta
+            if delta.syntax_error:
+                applied_rec = AppliedSectionUpdate(
+                    doc_path=src_path,
+                    section_id="syntax_error",
+                    section_heading="Syntax Error",
+                    status="rejected",
+                    original_section_content="",
+                    new_section_content="",
+                    explanation=f"Syntax error in source file {src_path}: {delta.syntax_error}",
+                    validation=ValidationResult(
+                        is_valid=False,
+                        failed_checks=[f"syntax_error_in_source: {delta.syntax_error}"],
+                    ),
+                )
+                report.rejected_updates.append(applied_rec)
+                report.total_sections_rejected += 1
 
         # 2. Impact Mapping: Map changes to documentation sections
         parsed_docs: dict[str, ParsedDocument] = {

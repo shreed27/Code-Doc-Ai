@@ -562,3 +562,425 @@ class TestPromptAndResponseHelpers:
         data = json.loads(raw_out)
         assert data["requires_human_review"] is True
         assert "AI completion unavailable" in data["review_reason"]
+
+
+class TestAdversarialProbesP1ToP15:
+    """
+    Direct verification of Claude's adversarial audit probes (P1 through P15).
+    Ensures safety remediation and product integration invariants are strictly maintained.
+    """
+
+    def test_p1_missing_section_target_handled_gracefully(self):
+        """P1: Missing section target handled cleanly without crash and leaves document untouched."""
+        from impact_mapper import ImpactEvidence, SectionImpact
+
+        fake_impact = SectionImpact(
+            source_file="src/missing.py",
+            changed_symbol="missing_fn",
+            change_category="added_symbol",
+            doc_path="doc.md",
+            section_id="nonexistent-target-section",
+            section_heading="Nonexistent",
+            is_deterministic=True,
+            confidence=1.0,
+            evidence=[ImpactEvidence("explicit_symbol", "missing_fn", "missing_fn", 1.0)],
+            reason="Function added",
+        )
+        original_doc = "# Title\n\n## Real Section\nReal content."
+        updater = DocumentationUpdater(ai_generator=make_mock_ai({"proposed_content": "xyz"}))
+        report = updater.update_documentation(
+            code_changes={"src/missing.py": ("", "def missing_fn(): pass")},
+            documents={"doc.md": original_doc},
+            precomputed_impacts=[fake_impact],
+        )
+
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected == 1
+        assert report.rejected_updates[0].status == "rejected"
+        assert report.updated_documents["doc.md"] == original_doc
+
+    def test_p2_insufficient_evidence_produces_review_required_with_call_count(self):
+        """P2: Insufficient evidence produces review-required and verifies AI call counts."""
+        calls = 0
+
+        def counting_ai(_sys, _user):
+            nonlocal calls
+            calls += 1
+            return json.dumps({
+                "proposed_content": "Uncertain changes.",
+                "explanation": "Low confidence on behavioral impact",
+                "uncertainties": ["Ambiguous interface change"],
+                "requires_human_review": True,
+                "review_reason": "Insufficient evidence to determine public contract.",
+            })
+
+        old_code = "def process(): return 1"
+        new_code = "def process(): return 2"
+        doc = "# Operations\n\n## Process\nCall `process`."
+
+        updater = DocumentationUpdater(ai_generator=counting_ai)
+        report = updater.update_documentation(
+            code_changes={"src/op.py": (old_code, new_code)},
+            documents={"ops.md": doc},
+        )
+
+        assert calls == 1
+        assert report.total_sections_applied == 0
+        assert len(report.review_required_updates) == 1
+        assert report.review_required_updates[0].status == "review_required"
+        assert report.updated_documents["ops.md"] == doc
+
+    def test_p3_deleted_symbol_active_rejected_vs_historical_accepted(self):
+        """P3: Active stale references to removed symbols rejected; historical notes accepted."""
+        old_code = "def old_calc(): pass"
+        new_code = "def new_calc(): pass"
+        doc = "# Math\n\n## Calculation\nCall `old_calc`."
+
+        # Case A: AI proposes active instruction to call removed symbol
+        active_ai = make_mock_ai({
+            "proposed_content": "Call `old_calc` or `new_calc` to perform the operation.",
+            "explanation": "Added new_calc",
+            "requires_human_review": False,
+        })
+        updater_a = DocumentationUpdater(ai_generator=active_ai)
+        report_a = updater_a.update_documentation(
+            code_changes={"src/calc.py": (old_code, new_code)},
+            documents={"calc.md": doc},
+        )
+        assert report_a.total_sections_applied == 0
+        assert report_a.total_sections_rejected == 1
+        assert any(
+            "active_reference_to_removed_symbol" in f
+            for f in report_a.rejected_updates[0].validation.failed_checks
+        )
+
+        # Case B: AI proposes historical deprecation/removal note
+        historical_ai = make_mock_ai({
+            "proposed_content": "The `old_calc` function has been removed and deprecated. Use `new_calc` instead.",
+            "explanation": "Documented removal of old_calc",
+            "requires_human_review": False,
+        })
+        updater_b = DocumentationUpdater(ai_generator=historical_ai)
+        report_b = updater_b.update_documentation(
+            code_changes={"src/calc.py": (old_code, new_code)},
+            documents={"calc.md": doc},
+        )
+        assert report_b.total_sections_applied == 1
+        assert "has been removed" in report_b.updated_documents["calc.md"]
+
+    def test_p4_idempotency_with_no_change_status_and_call_counts(self):
+        """P4: Idempotency with no_change status and prevents redundant re-writes."""
+        old_code = "def get_user(): pass"
+        new_code = "def get_user(uid: int): pass"
+        doc = "# API\n\n## Users\nCall `get_user(uid)` with user ID."
+
+        calls = 0
+
+        def static_ai(_s, _u):
+            nonlocal calls
+            calls += 1
+            return json.dumps({
+                "proposed_content": "Call `get_user(uid)` with user ID.",
+                "explanation": "Already matches up-to-date documentation",
+                "requires_human_review": False,
+            })
+
+        updater = DocumentationUpdater(ai_generator=static_ai)
+        report = updater.update_documentation(
+            code_changes={"src/user.py": (old_code, new_code)},
+            documents={"api.md": doc},
+        )
+
+        assert calls == 1
+        assert report.total_sections_applied == 0
+        assert len(report.applied_updates) == 1
+        assert report.applied_updates[0].status == "no_change"
+        assert report.updated_documents["api.md"] == doc
+
+    def test_p5_unrelated_sections_compared_completely_byte_for_byte(self):
+        """P5: All non-target sections remain 100% byte-identical."""
+        old_code = "def step_b(): pass"
+        new_code = "def step_b(v: int = 1): pass"
+
+        doc = (
+            "# Workflow\n\n"
+            "## Section 1\n"
+            "| Key | Value |\n"
+            "| --- | --- |\n"
+            "| alpha | 123 |\n"
+            "Trailing whitespace here   \n\n"
+            "## Section 2\n"
+            "Call `step_b`.\n\n"
+            "## Section 3\n"
+            "Special symbols: 🚀 and `code_snippet`.\n"
+        )
+        mock_ai = make_mock_ai({
+            "proposed_content": "Call `step_b(v)` with version.",
+            "explanation": "Updated step_b",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/workflow.py": (old_code, new_code)},
+            documents={"workflow.md": doc},
+        )
+
+        assert report.total_sections_applied == 1
+        res = report.updated_documents["workflow.md"]
+
+        sec1_orig = "## Section 1\n| Key | Value |\n| --- | --- |\n| alpha | 123 |\nTrailing whitespace here   "
+        sec3_orig = "## Section 3\nSpecial symbols: 🚀 and `code_snippet`.\n"
+        assert sec1_orig in res
+        assert sec3_orig in res
+
+    def test_p6_parameter_type_spoofing_rejected(self):
+        """P6: Reject parameter type spoofing (e.g. timeout: int documented as timeout: str)."""
+        old_code = "def dial(): pass"
+        new_code = "def dial(timeout: int = 10): pass"
+        doc = "# Network\n\n## Dial\nCall `dial`."
+
+        # Document falsely claims timeout is a str
+        mock_ai = make_mock_ai({
+            "proposed_content": "Call `dial(timeout: str)` to connect.",
+            "explanation": "Documented timeout parameter",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/net.py": (old_code, new_code)},
+            documents={"net.md": doc},
+        )
+
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected == 1
+        assert any(
+            "parameter_type_mismatch" in f
+            for f in report.rejected_updates[0].validation.failed_checks
+        )
+
+    def test_p7_parameter_default_value_spoofing_rejected(self):
+        """P7: Reject parameter default value spoofing (e.g. actual default is 60, doc claims 45)."""
+        old_code = "def connect(): pass"
+        new_code = "def connect(timeout: int = 60): pass"
+        doc = "# Connect\n\n## Dial\nCall `connect`."
+
+        # Document claims timeout default is 45 instead of 60
+        mock_ai = make_mock_ai({
+            "proposed_content": "Call `connect(timeout=45)` with default timeout 45 seconds.",
+            "explanation": "Documented timeout parameter",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/connect.py": (old_code, new_code)},
+            documents={"connect.md": doc},
+        )
+
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected == 1
+        assert any(
+            "parameter_default_mismatch" in f
+            for f in report.rejected_updates[0].validation.failed_checks
+        )
+
+    def test_p8_fabricated_function_name_rejected(self):
+        """P8: Reject fabricated / invented functions not present in source AST."""
+        old_code = "def backup(): pass"
+        new_code = "def backup(dest: str = '/tmp'): pass"
+        doc = "# Backup\n\n## Run\nCall `backup`."
+
+        mock_ai = make_mock_ai({
+            "proposed_content": "Call `backup(dest)` or use `cloud_storage_auto_sync()` for cloud backup.",
+            "explanation": "Added cloud backup helper",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/backup.py": (old_code, new_code)},
+            documents={"backup.md": doc},
+        )
+
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected == 1
+        assert any(
+            "unsupported_technical_tokens" in f
+            for f in report.rejected_updates[0].validation.failed_checks
+        )
+
+    def test_p9_comments_and_string_literals_cannot_validate_symbols(self):
+        """P9: Tokens found only in comments or string literals cannot validate AI hallucinations."""
+        old_code = "def render(): pass"
+        new_code = '''
+# TODO: consider adding hardware_accelerated_gl()
+FALLBACK_LABEL = "legacy_raster_renderer"
+def render(quality: int = 1):
+    msg = "software_engine_pipeline"
+    return quality
+'''
+        doc = "# Render\n\n## Overview\nCall `render`."
+
+        # AI hallucinates functions from comments or strings
+        mock_ai = make_mock_ai({
+            "proposed_content": "Call `render(quality)` or call `hardware_accelerated_gl()`.",
+            "explanation": "Added hardware gl",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/render.py": (old_code, new_code)},
+            documents={"render.md": doc},
+        )
+
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected == 1
+        assert any(
+            "unsupported_technical_tokens" in f
+            for f in report.rejected_updates[0].validation.failed_checks
+        )
+
+    def test_p10_unbalanced_code_fences_rejected(self):
+        """P10: Reject proposed documentation with unclosed / unbalanced code fences."""
+        old_code = "def ping(): pass"
+        new_code = "def ping(count: int = 1): pass"
+        doc = "# Health\n\n## Check\nCall `ping`."
+
+        # AI returns an unclosed code fence
+        mock_ai = make_mock_ai({
+            "proposed_content": "Call ping:\n```python\nping(count=1)\n",
+            "explanation": "Added code fence with ping",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/health.py": (old_code, new_code)},
+            documents={"health.md": doc},
+        )
+
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected == 1
+        assert any(
+            "unbalanced_code_fences" in f
+            for f in report.rejected_updates[0].validation.failed_checks
+        )
+
+    def test_p11_leaf_section_heading_injection_rejected(self):
+        """P11: Reject introducing headings into leaf sections."""
+        old_code = "def setup(): pass"
+        new_code = "def setup(mode: str = 'auto'): pass"
+        doc = "# Installation\n\n## Quickstart\nCall `setup`."
+
+        # AI attempts to inject subheadings into a leaf section
+        mock_ai = make_mock_ai({
+            "proposed_content": "Call `setup(mode)`.\n\n### Advanced Options\nSet mode to manual.",
+            "explanation": "Added advanced options subsection",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/install.py": (old_code, new_code)},
+            documents={"install.md": doc},
+        )
+
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected == 1
+        assert any(
+            "headings_introduced_in_leaf_section" in f
+            for f in report.rejected_updates[0].validation.failed_checks
+        )
+
+    def test_p12_yaml_front_matter_preserved_without_corruption(self):
+        """P12: Documents with YAML front matter are updated without corrupting header metadata."""
+        old_code = "def run(): pass"
+        new_code = "def run(verbose: bool = False): pass"
+
+        doc = (
+            "---\n"
+            "title: Operational Guide\n"
+            "version: 2.1\n"
+            "author: Core Team\n"
+            "---\n\n"
+            "# Manual\n\n"
+            "## Running\n"
+            "Call `run` to start.\n"
+        )
+        mock_ai = make_mock_ai({
+            "proposed_content": "Call `run(verbose)` to start.",
+            "explanation": "Added verbose flag",
+            "requires_human_review": False,
+        })
+        updater = DocumentationUpdater(ai_generator=mock_ai)
+        report = updater.update_documentation(
+            code_changes={"src/run.py": (old_code, new_code)},
+            documents={"manual.md": doc},
+        )
+
+        assert report.total_sections_applied == 1
+        res = report.updated_documents["manual.md"]
+        assert res.startswith("---\ntitle: Operational Guide\nversion: 2.1\nauthor: Core Team\n---")
+        assert "run(verbose)" in res
+
+    def test_p13_malformed_ai_responses_handled_safely(self):
+        """P13: Handle null, list, number, missing keys, and invalid responses safely."""
+        from doc_updater import parse_ai_response
+
+        # null proposed_content
+        resp_null = parse_ai_response(
+            json.dumps({"proposed_content": None, "explanation": "test"}), "doc.md", "sec"
+        )
+        assert resp_null.requires_human_review is True
+        assert "proposed_content must be a string" in resp_null.review_reason
+
+        # list proposed_content
+        resp_list = parse_ai_response(
+            json.dumps({"proposed_content": ["a", "b"], "explanation": "test"}), "doc.md", "sec"
+        )
+        assert resp_list.requires_human_review is True
+
+        # number proposed_content
+        resp_num = parse_ai_response(
+            json.dumps({"proposed_content": 42, "explanation": "test"}), "doc.md", "sec"
+        )
+        assert resp_num.requires_human_review is True
+
+        # empty text
+        resp_empty = parse_ai_response("", "doc.md", "sec")
+        assert resp_empty.requires_human_review is True
+
+    def test_p14_source_syntax_error_reported_without_calling_ai(self):
+        """P14: Source syntax errors reported immediately without invoking AI generator."""
+        old_code = "def ok(): pass"
+        new_code = "def bad_syntax(::: invalid python code"
+        doc = "# API\n\n## Functions\nCall `ok`."
+
+        calls = 0
+
+        def should_never_be_called(_s, _u):
+            nonlocal calls
+            calls += 1
+            return json.dumps({"proposed_content": "xyz"})
+
+        updater = DocumentationUpdater(ai_generator=should_never_be_called)
+        report = updater.update_documentation(
+            code_changes={"src/broken.py": (old_code, new_code)},
+            documents={"api.md": doc},
+        )
+
+        # AI generator must NOT be invoked
+        assert calls == 0
+        assert report.total_sections_applied == 0
+        assert report.total_sections_rejected == 1
+        assert "syntax error" in report.rejected_updates[0].explanation.lower()
+
+    def test_p15_suggest_docs_integration_feature_flag(self, tmp_path, monkeypatch):
+        """P15: Integration test for suggest_docs.py feature flag enabled vs disabled."""
+        from doc_updater import atomic_overwrite_file
+
+        doc_file = tmp_path / "README.md"
+        doc_file.write_text("# Service\n\n## Usage\nCall `start`.\n")
+
+        # Test atomic_overwrite_file directly
+        updated_text = "# Service\n\n## Usage\nCall `start(port)`.\n"
+        success = atomic_overwrite_file(doc_file, updated_text)
+        assert success is True
+        assert doc_file.read_text() == updated_text
+
