@@ -342,9 +342,7 @@ def parse_previous_review(pr_number):
         return result
 
 
-def format_section_update_review_comment(
-    report, commit_info=None, feature_section=""
-) -> str:
+def format_section_update_review_comment(report, commit_info=None, feature_section="") -> str:
     """
     Format a detailed GitHub review comment for the section updater run (Priority 2, N2).
 

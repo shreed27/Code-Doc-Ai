@@ -153,9 +153,7 @@ Call `legacy_handler` to process v1 requests.
         new_code = "def export_data(format: str, compress: bool = True): pass"
 
         doc1 = "# User Guide\n\n## Exporting\nRun `export_data`."
-        doc2 = (
-            "# API Reference\n\n## Export Details\nThe `export_data` function details."
-        )
+        doc2 = "# API Reference\n\n## Export Details\nThe `export_data` function details."
 
         def multi_mock(_sys, user_prompt: str) -> str:
             if "docs/guide.md" in user_prompt:
@@ -217,9 +215,7 @@ Check logs at `/var/log/app.log`.
             "# Application\n\n## Overview\nThis is an untouched overview paragraph with exact spacing.\n\n## Getting Started"
         )
         # Suffix check
-        assert updated_text.endswith(
-            "## Troubleshooting\nCheck logs at `/var/log/app.log`.\n"
-        )
+        assert updated_text.endswith("## Troubleshooting\nCheck logs at `/var/log/app.log`.\n")
 
     def test_nested_markdown_sections_are_preserved(self):
         old_code = "def init_cluster(): pass"
@@ -546,9 +542,7 @@ class TestPromptAndResponseHelpers:
             reason="Fake reason",
         )
 
-        updater = DocumentationUpdater(
-            ai_generator=make_mock_ai({"proposed_content": "xyz"})
-        )
+        updater = DocumentationUpdater(ai_generator=make_mock_ai({"proposed_content": "xyz"}))
         report = updater.update_documentation(
             code_changes={"src/fake.py": ("x=1", "x=2")},
             documents={"doc.md": "# Doc\nContent"},
@@ -587,15 +581,11 @@ class TestAdversarialProbesP1ToP15:
             section_heading="Nonexistent",
             is_deterministic=True,
             confidence=1.0,
-            evidence=[
-                ImpactEvidence("explicit_symbol", "missing_fn", "missing_fn", 1.0)
-            ],
+            evidence=[ImpactEvidence("explicit_symbol", "missing_fn", "missing_fn", 1.0)],
             reason="Function added",
         )
         original_doc = "# Title\n\n## Real Section\nReal content."
-        updater = DocumentationUpdater(
-            ai_generator=make_mock_ai({"proposed_content": "xyz"})
-        )
+        updater = DocumentationUpdater(ai_generator=make_mock_ai({"proposed_content": "xyz"}))
         report = updater.update_documentation(
             code_changes={"src/missing.py": ("", "def missing_fn(): pass")},
             documents={"doc.md": original_doc},
@@ -951,9 +941,7 @@ def render(quality: int = 1):
 
         assert report.total_sections_applied == 1
         res = report.updated_documents["manual.md"]
-        assert res.startswith(
-            "---\ntitle: Operational Guide\nversion: 2.1\nauthor: Core Team\n---"
-        )
+        assert res.startswith("---\ntitle: Operational Guide\nversion: 2.1\nauthor: Core Team\n---")
         assert "run(verbose)" in res
 
     def test_p13_malformed_ai_responses_handled_safely(self):
@@ -1044,7 +1032,10 @@ class TestDocumentTransactionSafety:
 
         # Supported markdown extensions
         assert tx.validate_destination_path("guide.md") == tmp_path / "guide.md"
-        assert tx.validate_destination_path("docs/spec.markdown") == (tmp_path / "docs/spec.markdown").resolve()
+        assert (
+            tx.validate_destination_path("docs/spec.markdown")
+            == (tmp_path / "docs/spec.markdown").resolve()
+        )
 
     def test_transaction_path_traversal_rejected(self, tmp_path):
         import pytest
@@ -1084,10 +1075,12 @@ class TestDocumentTransactionSafety:
         doc2.write_text("# Doc 2\nOriginal\n")
 
         tx = DocumentTransaction(docs_root=tmp_path)
-        tx.stage_updates({
-            "doc1.md": "# Doc 1\nUpdated 1\n",
-            "sub/doc2.md": "# Doc 2\nUpdated 2\n",
-        })
+        tx.stage_updates(
+            {
+                "doc1.md": "# Doc 1\nUpdated 1\n",
+                "sub/doc2.md": "# Doc 2\nUpdated 2\n",
+            }
+        )
         tx.commit()
 
         assert doc1.read_text() == "# Doc 1\nUpdated 1\n"
@@ -1106,10 +1099,12 @@ class TestDocumentTransactionSafety:
         doc2.write_text("# Doc 2\nOriginal 2\n")
 
         tx = DocumentTransaction(docs_root=tmp_path)
-        tx.stage_updates({
-            "doc1.md": "# Doc 1\nNew 1\n",
-            "doc2.md": "# Doc 2\nNew 2\n",
-        })
+        tx.stage_updates(
+            {
+                "doc1.md": "# Doc 1\nNew 1\n",
+                "doc2.md": "# Doc 2\nNew 2\n",
+            }
+        )
 
         # Make os.replace fail on the second file
         real_replace = os.replace
@@ -1155,11 +1150,13 @@ class TestTechnicalClaimValidation:
         new_code = "def create_user(name: str, email: str = ''): pass"
         doc = "# Users\n\n## Create\nCall `create_user`."
 
-        mock_ai = make_mock_ai({
-            "proposed_content": "Call `create_user(name, admin=True)` to create an admin.",
-            "explanation": "Added admin parameter",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Call `create_user(name, admin=True)` to create an admin.",
+                "explanation": "Added admin parameter",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/user.py": (old_code, new_code)},
@@ -1167,7 +1164,11 @@ class TestTechnicalClaimValidation:
         )
         assert report.total_sections_applied == 0
         assert report.total_sections_rejected >= 1
-        assert any("unknown_parameter_in_call" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+        assert any(
+            "unknown_parameter_in_call" in f
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
+        )
 
     def test_c1_supports_nonexistent_option_rejected(self):
         """Reject claim that function supports a nonexistent option."""
@@ -1175,11 +1176,13 @@ class TestTechnicalClaimValidation:
         new_code = "def query(term: str, limit: int = 10): pass"
         doc = "# Search\n\n## Query\nCall `query`."
 
-        mock_ai = make_mock_ai({
-            "proposed_content": "The `query` function supports the `max_retries` option for queries.",
-            "explanation": "Documented query options",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "The `query` function supports the `max_retries` option for queries.",
+                "explanation": "Documented query options",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/search.py": (old_code, new_code)},
@@ -1187,7 +1190,11 @@ class TestTechnicalClaimValidation:
         )
         assert report.total_sections_applied == 0
         assert report.total_sections_rejected >= 1
-        assert any("unsupported_option_or_parameter" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+        assert any(
+            "unsupported_option_or_parameter" in f
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
+        )
 
     def test_c1_invented_rate_limit_or_numeric_claim_rejected(self):
         """Reject fabricated numeric limits and claims not found in source code."""
@@ -1195,11 +1202,13 @@ class TestTechnicalClaimValidation:
         new_code = "def send(data: str): pass"
         doc = "# API\n\n## Send\nCall `send`."
 
-        mock_ai = make_mock_ai({
-            "proposed_content": "Call `send(data)`. All requests are rate limited to 500 requests per minute.",
-            "explanation": "Added rate limit",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Call `send(data)`. All requests are rate limited to 500 requests per minute.",
+                "explanation": "Added rate limit",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/api.py": (old_code, new_code)},
@@ -1207,7 +1216,11 @@ class TestTechnicalClaimValidation:
         )
         assert report.total_sections_applied == 0
         assert report.total_sections_rejected >= 1
-        assert any("unsupported_numeric_claim" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+        assert any(
+            "unsupported_numeric_claim" in f
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
+        )
 
     def test_c1_return_type_mismatch_rejected(self):
         """Reject documentation claiming return type conflicting with source annotation."""
@@ -1215,11 +1228,13 @@ class TestTechnicalClaimValidation:
         new_code = "def count_items() -> int: return 42"
         doc = "# Counters\n\n## Count\nCall `count_items`."
 
-        mock_ai = make_mock_ai({
-            "proposed_content": "The `count_items` function returns a list of strings.",
-            "explanation": "Documented return value",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "The `count_items` function returns a list of strings.",
+                "explanation": "Documented return value",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/counter.py": (old_code, new_code)},
@@ -1227,7 +1242,11 @@ class TestTechnicalClaimValidation:
         )
         assert report.total_sections_applied == 0
         assert report.total_sections_rejected >= 1
-        assert any("return_type_mismatch" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+        assert any(
+            "return_type_mismatch" in f
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
+        )
 
     def test_c1_unsupported_environment_variable_rejected(self):
         """Reject invented environment variable names not accessed in source."""
@@ -1235,11 +1254,13 @@ class TestTechnicalClaimValidation:
         new_code = "import os\ndef init(debug: bool = False): pass"
         doc = "# Config\n\n## Init\nCall `init`."
 
-        mock_ai = make_mock_ai({
-            "proposed_content": "Call `init(debug)` and configure database via `MY_APP_SECRET_ACCESS_KEY` environment variable.",
-            "explanation": "Added env config",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Call `init(debug)` and configure database via `MY_APP_SECRET_ACCESS_KEY` environment variable.",
+                "explanation": "Added env config",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/init.py": (old_code, new_code)},
@@ -1247,7 +1268,11 @@ class TestTechnicalClaimValidation:
         )
         assert report.total_sections_applied == 0
         assert report.total_sections_rejected >= 1
-        assert any("unsupported_environment_variable" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+        assert any(
+            "unsupported_environment_variable" in f
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
+        )
 
 
 class TestRemovedSymbolsStrictValidation:
@@ -1259,11 +1284,13 @@ class TestRemovedSymbolsStrictValidation:
         new_code = "def v2_handler(): pass"
         doc = "# API\n\n## Handler\nCall `legacy_handler`."
 
-        mock_ai = make_mock_ai({
-            "proposed_content": "Call `legacy_handler` to handle migration of requests.",
-            "explanation": "Updated handler for migration",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Call `legacy_handler` to handle migration of requests.",
+                "explanation": "Updated handler for migration",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/handler.py": (old_code, new_code)},
@@ -1271,7 +1298,11 @@ class TestRemovedSymbolsStrictValidation:
         )
         assert report.total_sections_applied == 0
         assert report.total_sections_rejected >= 1
-        assert any("active_reference_to_removed_symbol" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+        assert any(
+            "active_reference_to_removed_symbol" in f
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
+        )
 
     def test_c3_call_removed_symbol_not_deprecated_claim_rejected(self):
         """Reject active instruction claiming removed symbol is 'not deprecated'."""
@@ -1279,11 +1310,13 @@ class TestRemovedSymbolsStrictValidation:
         new_code = "def v2_handler(): pass"
         doc = "# API\n\n## Handler\nCall `legacy_handler`."
 
-        mock_ai = make_mock_ai({
-            "proposed_content": "Call `legacy_handler`; it is not deprecated.",
-            "explanation": "Handler note",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Call `legacy_handler`; it is not deprecated.",
+                "explanation": "Handler note",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/handler.py": (old_code, new_code)},
@@ -1291,7 +1324,11 @@ class TestRemovedSymbolsStrictValidation:
         )
         assert report.total_sections_applied == 0
         assert report.total_sections_rejected >= 1
-        assert any("active_reference_to_removed_symbol" in f for r in report.rejected_updates for f in r.validation.failed_checks)
+        assert any(
+            "active_reference_to_removed_symbol" in f
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
+        )
 
     def test_c3_supported_removal_explanation_accepted(self):
         """Accept factual statement that removed symbol was removed in a release."""
@@ -1299,11 +1336,13 @@ class TestRemovedSymbolsStrictValidation:
         new_code = "def v2_handler(): pass"
         doc = "# API\n\n## Handler\nCall `legacy_handler`."
 
-        mock_ai = make_mock_ai({
-            "proposed_content": "`legacy_handler` was removed in version 2.0.",
-            "explanation": "Removal notice",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "`legacy_handler` was removed in version 2.0.",
+                "explanation": "Removal notice",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/handler.py": (old_code, new_code)},
@@ -1318,11 +1357,13 @@ class TestRemovedSymbolsStrictValidation:
         new_code = "def new_handler(): pass"
         doc = "# API\n\n## Handler\nCall `legacy_handler`."
 
-        mock_ai = make_mock_ai({
-            "proposed_content": "Replace `legacy_handler` with `new_handler`.",
-            "explanation": "Replacement notice",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Replace `legacy_handler` with `new_handler`.",
+                "explanation": "Replacement notice",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/handler.py": (old_code, new_code)},
@@ -1338,11 +1379,13 @@ class TestRemovedSymbolsStrictValidation:
         doc = "# Guide\n\n## Section\nCall `old_fn` to start.\n"
 
         # AI proposes identical content
-        mock_ai = make_mock_ai({
-            "proposed_content": "Call `old_fn` to start.\n",
-            "explanation": "No change",
-            "requires_human_review": False,
-        })
+        mock_ai = make_mock_ai(
+            {
+                "proposed_content": "Call `old_fn` to start.\n",
+                "explanation": "No change",
+                "requires_human_review": False,
+            }
+        )
         updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={"src/service.py": (old_code, new_code)},
@@ -1353,4 +1396,3 @@ class TestRemovedSymbolsStrictValidation:
         assert len(report.review_required_updates) == 1
         assert report.review_required_updates[0].status == "review_required"
         assert "Removed symbol" in report.review_required_updates[0].explanation
-

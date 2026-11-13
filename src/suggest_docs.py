@@ -574,12 +574,8 @@ def main():
                 code_changes[p] = (sc.old_code, sc.new_code)
 
         # 2. Partition relevant files: supported markdown vs non-markdown
-        md_files = [
-            f for f in relevant_files if f.lower().endswith((".md", ".markdown"))
-        ]
-        non_md_files = [
-            f for f in relevant_files if not f.lower().endswith((".md", ".markdown"))
-        ]
+        md_files = [f for f in relevant_files if f.lower().endswith((".md", ".markdown"))]
+        non_md_files = [f for f in relevant_files if not f.lower().endswith((".md", ".markdown"))]
 
         # 3. Load documentation files
         docs_map = {}

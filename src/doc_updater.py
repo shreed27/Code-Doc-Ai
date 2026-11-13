@@ -370,9 +370,7 @@ You must respond ONLY with a JSON object in this exact format:
 }"""
 
 
-def build_update_prompt(
-    req: SectionUpdateRequest, max_context_chars: int | None = None
-) -> str:
+def build_update_prompt(req: SectionUpdateRequest, max_context_chars: int | None = None) -> str:
     """
     Construct an evidence-rich prompt for the AI documentation generator.
 
@@ -417,9 +415,7 @@ def build_update_prompt(
     if req.style_guidelines:
         style_text = f"\n### Style Guidelines:\n{redact_secrets(req.style_guidelines)}\n"
 
-    base_len = (
-        sum(len(p) for p in header_parts) + len(target_sec_text) + len(style_text) + 200
-    )
+    base_len = sum(len(p) for p in header_parts) + len(target_sec_text) + len(style_text) + 200
     available_for_code = max_context_chars - base_len
     if available_for_code < 1000:
         available_for_code = 1000
@@ -445,12 +441,7 @@ def build_update_prompt(
             )
 
     full_prompt = (
-        "\n".join(header_parts)
-        + "\n"
-        + "\n".join(code_parts)
-        + "\n"
-        + target_sec_text
-        + style_text
+        "\n".join(header_parts) + "\n" + "\n".join(code_parts) + "\n" + target_sec_text + style_text
     )
     return full_prompt
 
@@ -512,9 +503,7 @@ def parse_ai_response(
             proposed_content="",
             explanation="Invalid proposed_content type",
             requires_human_review=True,
-            review_reason=(
-                f"proposed_content must be a string, got {type(raw_content).__name__}."
-            ),
+            review_reason=(f"proposed_content must be a string, got {type(raw_content).__name__}."),
         )
 
     doc_path = data.get("doc_path", expected_doc_path)
@@ -531,17 +520,13 @@ def parse_ai_response(
 
     raw_evidence = data.get("technical_evidence", [])
     if isinstance(raw_evidence, list):
-        technical_evidence = [
-            str(x) for x in raw_evidence if isinstance(x, str | int | float)
-        ]
+        technical_evidence = [str(x) for x in raw_evidence if isinstance(x, str | int | float)]
     else:
         technical_evidence = []
 
     raw_uncertainties = data.get("uncertainties", [])
     if isinstance(raw_uncertainties, list):
-        uncertainties = [
-            str(x) for x in raw_uncertainties if isinstance(x, str | int | float)
-        ]
+        uncertainties = [str(x) for x in raw_uncertainties if isinstance(x, str | int | float)]
     else:
         uncertainties = []
 
@@ -585,7 +570,7 @@ class _CodeFactExtractor(ast.NodeVisitor):
         self.constants: dict[str, str] = {}
 
     def visit_Constant(self, node: ast.Constant) -> None:
-        if isinstance(node.value, (int, float)):
+        if isinstance(node.value, int | float):
             self.numeric_literals.add(str(node.value))
         self.generic_visit(node)
 
@@ -598,11 +583,7 @@ class _CodeFactExtractor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def _record_func(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        all_args = (
-            node.args.args
-            + node.args.kwonlyargs
-            + getattr(node.args, "posonlyargs", [])
-        )
+        all_args = node.args.args + node.args.kwonlyargs + getattr(node.args, "posonlyargs", [])
         self.func_params[node.name] = {a.arg for a in all_args}
         if node.returns:
             try:
@@ -614,21 +595,17 @@ class _CodeFactExtractor(ast.NodeVisitor):
         for target in node.targets:
             if isinstance(target, ast.Name):
                 try:
-                    self.constants[target.id] = (
-                        ast.unparse(node.value).strip().strip("'\"")
-                    )
+                    self.constants[target.id] = ast.unparse(node.value).strip().strip("'\"")
                 except Exception:
                     pass
         self.generic_visit(node)
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
-        if (
-            isinstance(node.value, ast.Attribute) and node.value.attr == "environ"
-        ) or (isinstance(node.value, ast.Name) and node.value.id == "environ"):
+        if (isinstance(node.value, ast.Attribute) and node.value.attr == "environ") or (
+            isinstance(node.value, ast.Name) and node.value.id == "environ"
+        ):
             slice_node = getattr(node.slice, "value", node.slice)
-            if isinstance(slice_node, ast.Constant) and isinstance(
-                slice_node.value, str
-            ):
+            if isinstance(slice_node, ast.Constant) and isinstance(slice_node.value, str):
                 self.env_vars.add(slice_node.value)
         self.generic_visit(node)
 
@@ -713,28 +690,20 @@ class DocumentationValidator:
             review_reasons.append(resp.review_reason or "AI requested human review.")
 
         if resp.uncertainties:
-            warnings.append(
-                f"AI reported uncertainties: {', '.join(resp.uncertainties)}"
-            )
-            review_reasons.append(
-                f"Uncertainties noted: {', '.join(resp.uncertainties)}"
-            )
+            warnings.append(f"AI reported uncertainties: {', '.join(resp.uncertainties)}")
+            review_reasons.append(f"Uncertainties noted: {', '.join(resp.uncertainties)}")
 
         # 3. Empty content check
         clean_prop = resp.proposed_content.strip()
         clean_orig = req.current_section_content.strip()
         if not clean_prop and clean_orig:
             warnings.append("proposed_content_is_empty")
-            review_reasons.append(
-                "Proposed content is empty while original section had text."
-            )
+            review_reasons.append("Proposed content is empty while original section had text.")
         else:
             passed.append("non_empty_content")
 
         # 4. Markdown Structure Safety (C2)
-        backtick_fence_count = len(
-            re.findall(r"(?m)^[ \t]*```", resp.proposed_content)
-        )
+        backtick_fence_count = len(re.findall(r"(?m)^[ \t]*```", resp.proposed_content))
         tilde_fence_count = len(re.findall(r"(?m)^[ \t]*~~~", resp.proposed_content))
         if backtick_fence_count % 2 != 0 or tilde_fence_count % 2 != 0:
             failed.append("unbalanced_code_fences")
@@ -745,9 +714,7 @@ class DocumentationValidator:
             re.search(r"(?m)^[ \t]*#{1,6}\s+\S+", clean_orig)
             or re.search(r"(?m)^[^\n]+\n[ \t]*(=+|-+)[ \t]*$", clean_orig)
         )
-        prop_has_atx = bool(
-            re.search(r"(?m)^[ \t]*#{1,6}\s+\S+", resp.proposed_content)
-        )
+        prop_has_atx = bool(re.search(r"(?m)^[ \t]*#{1,6}\s+\S+", resp.proposed_content))
         prop_has_setext = bool(
             re.search(
                 r"(?m)^[A-Za-z0-9_`*][^\n]*\n[ \t]*(=+|-{2,})[ \t]*$",
@@ -816,9 +783,7 @@ class DocumentationValidator:
                     valid_constants[new_c.name.split(".")[-1]] = new_c
 
         # 6. Verify Technical Tokens & Factual Accuracy (C1)
-        new_tokens = DocumentationValidator._extract_new_technical_tokens(
-            clean_orig, clean_prop
-        )
+        new_tokens = DocumentationValidator._extract_new_technical_tokens(clean_orig, clean_prop)
         hallucinated_tokens: list[str] = []
 
         allowed_all = (
@@ -833,16 +798,12 @@ class DocumentationValidator:
         for token in new_tokens:
             is_valid = token in allowed_all or len(token) <= 2
             if not is_valid:
-                in_evidence = any(
-                    token == ev.matched_text for ev in req.impact_evidence
-                )
+                in_evidence = any(token == ev.matched_text for ev in req.impact_evidence)
                 if not in_evidence:
                     hallucinated_tokens.append(token)
 
         if hallucinated_tokens:
-            failed.append(
-                f"unsupported_technical_tokens: {sorted(hallucinated_tokens)}"
-            )
+            failed.append(f"unsupported_technical_tokens: {sorted(hallucinated_tokens)}")
         else:
             passed.append("no_hallucinated_technical_symbols")
 
@@ -966,12 +927,8 @@ class DocumentationValidator:
                 )
                 for claimed_ret in ret_matches:
                     c_ret = claimed_ret.strip().lower()
-                    if (
-                        ("list" in c_ret or "str" in c_ret)
-                        and ret_type == "int"
-                    ) or (
-                        ("int" in c_ret or "number" in c_ret)
-                        and "str" in ret_type
+                    if (("list" in c_ret or "str" in c_ret) and ret_type == "int") or (
+                        ("int" in c_ret or "number" in c_ret) and "str" in ret_type
                     ):
                         failed.append(
                             f"return_type_mismatch: function '{f_name}' returns '{ret_type}', but documentation claims '{claimed_ret.strip()}'"
@@ -1018,17 +975,13 @@ class DocumentationValidator:
                             "call on",
                         ]
                         starts_with_active = any(
-                            re.search(
-                                rf"\b{v}\b.*?\b{re.escape(short_name)}\b", cl_lower
-                            )
+                            re.search(rf"\b{v}\b.*?\b{re.escape(short_name)}\b", cl_lower)
                             for v in active_verbs
                         )
                         is_not_deprecated = (
                             "not deprecated" in cl_lower or "isn't deprecated" in cl_lower
                         )
-                        is_active_call = bool(
-                            re.search(rf"\b{re.escape(short_name)}\s*\(", cl)
-                        )
+                        is_active_call = bool(re.search(rf"\b{re.escape(short_name)}\s*\(", cl))
 
                         if starts_with_active or is_not_deprecated or is_active_call:
                             failed.append(
@@ -1037,12 +990,9 @@ class DocumentationValidator:
                             break
 
                         is_removal = any(
-                            kw in cl_lower
-                            for kw in ["removed", "deleted", "dropped", "obsolete"]
+                            kw in cl_lower for kw in ["removed", "deleted", "dropped", "obsolete"]
                         )
-                        is_deprecation = (
-                            "deprecated" in cl_lower and not is_not_deprecated
-                        )
+                        is_deprecation = "deprecated" in cl_lower and not is_not_deprecated
                         is_replacement = bool(
                             re.search(
                                 rf"\breplace\b.*?\b{re.escape(short_name)}\b.*?\bwith\b\s+`?([A-Za-z_][A-Za-z0-9_]*)`?",
@@ -1069,9 +1019,7 @@ class DocumentationValidator:
         )
 
     @staticmethod
-    def _extract_new_technical_tokens(
-        original_text: str, proposed_text: str
-    ) -> set[str]:
+    def _extract_new_technical_tokens(original_text: str, proposed_text: str) -> set[str]:
         """Extract code identifiers present in proposed text but absent in original text."""
         orig_backticks = set(re.findall(r"`([A-Za-z_][A-Za-z0-9_.]*)`", original_text))
         prop_backticks = set(re.findall(r"`([A-Za-z_][A-Za-z0-9_.]*)`", proposed_text))
@@ -1165,16 +1113,12 @@ class DocumentationUpdater:
             for src_path, (old_src, new_src) in code_changes.items():
                 if deltas.get(src_path) and deltas[src_path].syntax_error:
                     continue
-                file_impacts = self.mapper.map_file_impacts(
-                    old_src, new_src, src_path, parsed_docs
-                )
+                file_impacts = self.mapper.map_file_impacts(old_src, new_src, src_path, parsed_docs)
                 raw_impacts.extend(file_impacts)
 
         # Filter weak, non-deterministic impacts (H5: Over-targeting)
         filtered_impacts = [
-            imp
-            for imp in raw_impacts
-            if imp.is_deterministic or imp.confidence >= 0.8
+            imp for imp in raw_impacts if imp.is_deterministic or imp.confidence >= 0.8
         ]
 
         consolidated = consolidate_impacts(filtered_impacts)
@@ -1189,9 +1133,7 @@ class DocumentationUpdater:
             removed_symbols.extend(delta.removed_symbols)
 
         # 3. Process each affected section
-        pending_section_patches: list[tuple[str, str, str, str, str, ValidationResult]] = (
-            []
-        )
+        pending_section_patches: list[tuple[str, str, str, str, str, ValidationResult]] = []
         # (doc_path, section_id, section_heading, orig_content, proposed_content, validation)
 
         for target in consolidated:
@@ -1218,9 +1160,7 @@ class DocumentationUpdater:
                 report.total_sections_rejected += 1
                 continue
 
-            current_section_content = parsed_doc.get_section_content(
-                sec, include_children=False
-            )
+            current_section_content = parsed_doc.get_section_content(sec, include_children=False)
 
             # Check for source syntax errors upfront: do not call AI
             syntax_errors = [
@@ -1258,14 +1198,10 @@ class DocumentationUpdater:
 
             # Build Request Context
             old_snips = {
-                src: code_changes[src][0]
-                for src in target.source_files
-                if src in code_changes
+                src: code_changes[src][0] for src in target.source_files if src in code_changes
             }
             new_snips = {
-                src: code_changes[src][1]
-                for src in target.source_files
-                if src in code_changes
+                src: code_changes[src][1] for src in target.source_files if src in code_changes
             }
 
             req = SectionUpdateRequest(
@@ -1405,9 +1341,7 @@ class DocumentationUpdater:
         # If any section in the run was rejected, abort the whole run!
         if report.total_sections_rejected > 0:
             report.total_sections_applied = 0
-            report.applied_updates = [
-                u for u in report.applied_updates if u.status == "no_change"
-            ]
+            report.applied_updates = [u for u in report.applied_updates if u.status == "no_change"]
             report.updated_documents = dict(documents)
             return report
 
@@ -1446,12 +1380,8 @@ class DocumentationUpdater:
                         raise ValueError(
                             f"Document invariant violation: section '{s_orig.id}' missing"
                         )
-                    c_orig = parsed_doc.get_section_content(
-                        s_orig, include_children=False
-                    )
-                    c_post = post_doc.get_section_content(
-                        s_post, include_children=False
-                    )
+                    c_orig = parsed_doc.get_section_content(s_orig, include_children=False)
+                    c_post = post_doc.get_section_content(s_post, include_children=False)
                     if c_orig != c_post:
                         raise ValueError(
                             f"Document invariant violation: non-target section '{s_orig.id}' was altered"
