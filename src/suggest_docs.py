@@ -716,6 +716,7 @@ def main():
                 commit_info,
                 include_full_content=False,
                 feature_section=feature_section,
+                section_report=section_report,
             )
 
         if update_mode and modified_files:
