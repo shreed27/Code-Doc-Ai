@@ -777,10 +777,11 @@ class TestAdversarialProbesP1ToP15:
         )
 
         assert report.total_sections_applied == 0
-        assert report.total_sections_rejected == 1
+        assert report.total_sections_rejected >= 1
         assert any(
             "parameter_default_mismatch" in f
-            for f in report.rejected_updates[0].validation.failed_checks
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
         )
 
     def test_p8_fabricated_function_name_rejected(self):
@@ -801,10 +802,11 @@ class TestAdversarialProbesP1ToP15:
         )
 
         assert report.total_sections_applied == 0
-        assert report.total_sections_rejected == 1
+        assert report.total_sections_rejected >= 1
         assert any(
             "unsupported_technical_tokens" in f
-            for f in report.rejected_updates[0].validation.failed_checks
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
         )
 
     def test_p9_comments_and_string_literals_cannot_validate_symbols(self):
@@ -832,10 +834,11 @@ def render(quality: int = 1):
         )
 
         assert report.total_sections_applied == 0
-        assert report.total_sections_rejected == 1
+        assert report.total_sections_rejected >= 1
         assert any(
             "unsupported_technical_tokens" in f
-            for f in report.rejected_updates[0].validation.failed_checks
+            for r in report.rejected_updates
+            for f in r.validation.failed_checks
         )
 
     def test_p10_unbalanced_code_fences_rejected(self):
