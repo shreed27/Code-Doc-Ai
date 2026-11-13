@@ -340,6 +340,13 @@ def parse_sections(markdown_text: str) -> ParsedDocument:
     idx = 0
     total_lines = len(lines)
 
+    # 0. Check for YAML front matter at document start
+    if total_lines > 1 and lines[0].strip() == "---":
+        for fm_i in range(1, total_lines):
+            if lines[fm_i].strip() in ("---", "..."):
+                idx = fm_i + 1
+                break
+
     while idx < total_lines:
         line = lines[idx]
 
@@ -551,8 +558,12 @@ def replace_section_content(
 
     nl = doc.newline
 
-    # Format new content
+    # Format new content with matching line endings
     clean_body = new_content.strip("\r\n")
+    if nl == "\r\n" and "\r\n" not in clean_body:
+        clean_body = clean_body.replace("\n", "\r\n")
+    elif nl == "\n" and "\r\n" in clean_body:
+        clean_body = clean_body.replace("\r\n", "\n")
 
     if section.is_preamble:
         if clean_body:

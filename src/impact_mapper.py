@@ -400,11 +400,16 @@ class DocumentationImpactMapper:
                             evidence_type="explicit_file_path",
                             matched_text=source_name,
                             context=self._extract_snippet(content, source_name),
-                            confidence=0.85,
+                            confidence=0.5,
                         )
                     )
-                    is_det = True
-                    conf = max(conf, 0.85)
+                    # File-path-only match is weak and non-deterministic unless symbol/heading matches
+                    conf = max(conf, 0.5)
+
+                # Determine whether mapping is deterministic based on direct symbol/heading match
+                is_det = any(
+                    ev.evidence_type in ("explicit_symbol", "heading_match") for ev in evidence
+                )
 
                 # Semantic fallback: section heading has high token overlap with added symbol/module
                 if not is_det:
@@ -597,17 +602,21 @@ class DocumentationImpactMapper:
 
                 # 4. File path match
                 if source_path.lower() in content.lower() or f"`{source_name}`" in content:
-                    # Only treat file path as evidence if there is also some symbol/feature affinity
                     evidence.append(
                         ImpactEvidence(
                             evidence_type="explicit_file_path",
                             matched_text=source_name,
                             context=self._extract_snippet(content, source_name),
-                            confidence=0.8,
+                            confidence=0.5,
                         )
                     )
-                    is_det = True
-                    conf = max(conf, 0.8)
+                    conf = max(conf, 0.5)
+
+                # Direct reference needed for deterministic status
+                is_det = any(
+                    ev.evidence_type in ("explicit_symbol", "heading_match", "signature_parameter")
+                    for ev in evidence
+                )
 
                 if evidence:
                     diff_desc = f" ({', '.join(param_diffs)})" if param_diffs else ""
