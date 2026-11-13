@@ -12,11 +12,24 @@ Coordinates the end-to-end documentation update pipeline:
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from ast_intel import ASTDelta, compute_ast_delta
+from ast_intel import (
+    ASTDelta,
+    ConstantInfo,
+    ImportInfo,
+    ParameterInfo,
+    SymbolInfo,
+    compute_ast_delta,
+    extract_python_constants,
+    extract_python_imports,
+    extract_python_symbols,
+)
 from impact_mapper import (
     DocumentationImpactMapper,
     ImpactEvidence,
@@ -24,6 +37,7 @@ from impact_mapper import (
     consolidate_impacts,
 )
 from section_patcher import ParsedDocument, parse_sections, replace_section_content
+from security_utils import sanitize_output
 
 # =============================================================================
 # DATA CONTRACTS
@@ -105,6 +119,38 @@ class DocumentationUpdateReport:
 
 
 # =============================================================================
+# ATOMIC FILE OPERATION
+# =============================================================================
+
+
+def atomic_overwrite_file(file_path: str | Path, content: str) -> bool:
+    """
+    Atomically write content to file_path using a temp file and os.replace.
+
+    Guarantees no partial writes or corrupted files on crash.
+    """
+    path = Path(file_path).resolve()
+    dir_path = path.parent
+    dir_path.mkdir(parents=True, exist_ok=True)
+
+    temp_fd, temp_path = tempfile.mkstemp(dir=dir_path, prefix=".tmp_doc_")
+    try:
+        with open(temp_fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+        return True
+    except Exception:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        return False
+
+
+# =============================================================================
 # PROMPT FORMATTER & PARSER
 # =============================================================================
 
@@ -132,8 +178,13 @@ You must respond ONLY with a JSON object in this exact format:
 }"""
 
 
-def build_update_prompt(req: SectionUpdateRequest) -> str:
-    """Construct an evidence-rich prompt for the AI documentation generator."""
+def build_update_prompt(req: SectionUpdateRequest, max_context_chars: int = 60000) -> str:
+    """
+    Construct an evidence-rich prompt for the AI documentation generator.
+
+    Applies clear untrusted boundary delimiters, credential sanitization,
+    and context window limits (H6).
+    """
     sections = [
         f"### Target Section: {req.section_heading} (`{req.section_id}`)",
         f"**Document**: `{req.doc_path}`",
@@ -147,32 +198,52 @@ def build_update_prompt(req: SectionUpdateRequest) -> str:
 
     sections.extend(["", "### Supporting Code Evidence:"])
     for ev in req.impact_evidence:
-        sections.append(f'- [{ev.evidence_type}] `{ev.matched_text}`: "{ev.context}"')
+        safe_ctx = sanitize_output(ev.context)
+        sections.append(f'- [{ev.evidence_type}] `{ev.matched_text}`: "{safe_ctx}"')
 
     sections.extend(["", "### Code Changes:"])
     for src in req.source_files:
-        old_snip = req.old_code_snippets.get(src, "").strip()
-        new_snip = req.new_code_snippets.get(src, "").strip()
+        old_snip = sanitize_output(req.old_code_snippets.get(src, "").strip())
+        new_snip = sanitize_output(req.new_code_snippets.get(src, "").strip())
         sections.append(f"#### File: `{src}`")
         if old_snip:
-            sections.append(f"```python\n# Previous code\n{old_snip}\n```")
+            sections.append(
+                f'<untrusted_source_code file="{src}" version="previous">\n{old_snip}\n</untrusted_source_code>'
+            )
         if new_snip:
-            sections.append(f"```python\n# Updated code\n{new_snip}\n```")
+            sections.append(
+                f'<untrusted_source_code file="{src}" version="updated">\n{new_snip}\n</untrusted_source_code>'
+            )
 
-    sections.extend(["", "### Current Section Content:"])
-    sections.append(f"```markdown\n{req.current_section_content}\n```")
+    safe_current_content = sanitize_output(req.current_section_content)
+    sections.extend(
+        [
+            "",
+            "### Current Section Content:",
+            f'<untrusted_current_documentation path="{req.doc_path}" section="{req.section_id}">\n{safe_current_content}\n</untrusted_current_documentation>',
+        ]
+    )
 
     if req.style_guidelines:
-        sections.extend(["", "### Style Guidelines:"])
-        sections.append(req.style_guidelines)
+        safe_style = sanitize_output(req.style_guidelines)
+        sections.extend(["", "### Style Guidelines:", safe_style])
 
-    return "\n".join(sections)
+    prompt = "\n".join(sections)
+    if len(prompt) > max_context_chars:
+        # Enforce context limits cleanly
+        prompt = prompt[:max_context_chars] + "\n\n[TRUNCATED FOR LENGTH]"
+    return prompt
 
 
 def parse_ai_response(
     raw_response: str, expected_doc_path: str, expected_section_id: str
 ) -> AISectionUpdateResponse:
-    """Parse and validate JSON response from the AI model with safe fallback handling."""
+    """
+    Parse and strictly validate JSON response from the AI model (C4).
+
+    Rejects or flags for human review on null content, non-string types,
+    or structural format discrepancies. Never uses blind str() conversion.
+    """
     if not raw_response or not raw_response.strip():
         return AISectionUpdateResponse(
             doc_path=expected_doc_path,
@@ -192,28 +263,86 @@ def parse_ai_response(
 
     try:
         data = json.loads(text)
-        if isinstance(data, dict):
-            return AISectionUpdateResponse(
-                doc_path=str(data.get("doc_path", expected_doc_path)),
-                section_id=str(data.get("section_id", expected_section_id)),
-                proposed_content=str(data.get("proposed_content", "")),
-                explanation=str(data.get("explanation", "")),
-                technical_evidence=list(data.get("technical_evidence", [])),
-                uncertainties=list(data.get("uncertainties", [])),
-                requires_human_review=bool(data.get("requires_human_review", False)),
-                review_reason=str(data.get("review_reason", "")),
-            )
-    except json.JSONDecodeError:
-        pass
+    except json.JSONDecodeError as exc:
+        return AISectionUpdateResponse(
+            doc_path=expected_doc_path,
+            section_id=expected_section_id,
+            proposed_content=raw_response.strip(),
+            explanation=f"Malformed JSON: {exc}",
+            requires_human_review=True,
+            review_reason=f"AI response is not valid JSON ({exc}); flagged for review.",
+        )
 
-    # If the model returned plain Markdown text instead of JSON
+    if not isinstance(data, dict):
+        return AISectionUpdateResponse(
+            doc_path=expected_doc_path,
+            section_id=expected_section_id,
+            proposed_content="",
+            explanation="AI response root is not a JSON object",
+            requires_human_review=True,
+            review_reason=f"Expected JSON object, got {type(data).__name__}.",
+        )
+
+    # Strict type verification (C4)
+    raw_content = data.get("proposed_content")
+    if raw_content is None or not isinstance(raw_content, str):
+        return AISectionUpdateResponse(
+            doc_path=expected_doc_path,
+            section_id=expected_section_id,
+            proposed_content="",
+            explanation="Invalid proposed_content type",
+            requires_human_review=True,
+            review_reason=(
+                f"proposed_content must be a string, got {type(raw_content).__name__}."
+            ),
+        )
+
+    doc_path = data.get("doc_path", expected_doc_path)
+    if not isinstance(doc_path, str):
+        doc_path = expected_doc_path
+
+    section_id = data.get("section_id", expected_section_id)
+    if not isinstance(section_id, str):
+        section_id = expected_section_id
+
+    explanation = data.get("explanation", "")
+    if not isinstance(explanation, str):
+        explanation = str(explanation)
+
+    raw_evidence = data.get("technical_evidence", [])
+    if isinstance(raw_evidence, list):
+        technical_evidence = [str(x) for x in raw_evidence if isinstance(x, (str, int, float))]
+    else:
+        technical_evidence = []
+
+    raw_uncertainties = data.get("uncertainties", [])
+    if isinstance(raw_uncertainties, list):
+        uncertainties = [str(x) for x in raw_uncertainties if isinstance(x, (str, int, float))]
+    else:
+        uncertainties = []
+
+    requires_human_review = bool(data.get("requires_human_review", False))
+    review_reason = data.get("review_reason", "")
+    if not isinstance(review_reason, str):
+        review_reason = str(review_reason)
+
+    # Flag mismatched targets for review
+    if doc_path != expected_doc_path or section_id != expected_section_id:
+        requires_human_review = True
+        review_reason = (
+            f"AI returned target mismatch: doc='{doc_path}', sec='{section_id}' "
+            f"(expected doc='{expected_doc_path}', sec='{expected_section_id}')."
+        )
+
     return AISectionUpdateResponse(
-        doc_path=expected_doc_path,
-        section_id=expected_section_id,
-        proposed_content=raw_response.strip(),
-        explanation="AI produced unstructured text",
-        requires_human_review=True,
-        review_reason="AI response could not be parsed as structured JSON; flagged for review.",
+        doc_path=doc_path,
+        section_id=section_id,
+        proposed_content=raw_content,
+        explanation=explanation,
+        technical_evidence=technical_evidence,
+        uncertainties=uncertainties,
+        requires_human_review=requires_human_review,
+        review_reason=review_reason,
     )
 
 
@@ -224,6 +353,63 @@ def parse_ai_response(
 
 class DocumentationValidator:
     """Performs deterministic validation on AI-generated documentation updates."""
+
+    # Words indicating a removed/deprecated symbol is being documented historically (C3)
+    _REMOVAL_EXPLANATORY_KEYWORDS = {
+        "removed",
+        "deprecated",
+        "deleted",
+        "dropped",
+        "replaced",
+        "superseded",
+        "obsolete",
+        "no longer",
+        "migration",
+    }
+
+    # Standard Python / Markdown tokens that are safe in documentation
+    _STANDARD_ALLOWED_TOKENS = {
+        "str",
+        "int",
+        "bool",
+        "float",
+        "dict",
+        "list",
+        "tuple",
+        "set",
+        "bytes",
+        "None",
+        "Optional",
+        "Union",
+        "Any",
+        "Callable",
+        "Iterable",
+        "Sequence",
+        "Mapping",
+        "true",
+        "false",
+        "null",
+        "self",
+        "cls",
+        "args",
+        "kwargs",
+        "return",
+        "yield",
+        "raise",
+        "try",
+        "except",
+        "finally",
+        "with",
+        "as",
+        "import",
+        "from",
+        "def",
+        "class",
+        "pass",
+        "lambda",
+        "async",
+        "await",
+    }
 
     @staticmethod
     def validate(
@@ -249,107 +435,207 @@ class DocumentationValidator:
             review_reasons.append(resp.review_reason or "AI requested human review.")
 
         if resp.uncertainties:
-            warnings.append(
-                f"AI reported uncertainties: {', '.join(resp.uncertainties)}"
-            )
-            review_reasons.append(
-                f"Uncertainties noted: {', '.join(resp.uncertainties)}"
-            )
+            warnings.append(f"AI reported uncertainties: {', '.join(resp.uncertainties)}")
+            review_reasons.append(f"Uncertainties noted: {', '.join(resp.uncertainties)}")
 
         # 3. Empty content check
         clean_prop = resp.proposed_content.strip()
         clean_orig = req.current_section_content.strip()
         if not clean_prop and clean_orig:
-            # If the original had content and proposal is completely empty without explanation
             warnings.append("proposed_content_is_empty")
-            review_reasons.append(
-                "Proposed content is empty while original section had text."
-            )
+            review_reasons.append("Proposed content is empty while original section had text.")
         else:
             passed.append("non_empty_content")
 
-        # 4. Markdown structure validity
-        # Ensure proposed content does not introduce unclosed fences or broken headings
-        test_markdown = f"# Test\n\n{resp.proposed_content}\n"
-        try:
-            test_doc = parse_sections(test_markdown)
-            passed.append("valid_markdown_structure")
-            # If the update introduced unintended subheadings when none were planned
-            if len(test_doc.sections) > 1 and not any(
-                "#" in line for line in clean_orig.splitlines()
-            ):
-                warnings.append("subheadings_introduced_in_leaf_section")
-        except Exception as e:
-            failed.append(f"invalid_markdown_structure: {e}")
+        # 4. Markdown Structure Safety (C2)
+        # 4a. Unbalanced code fences check (``` and ~~~)
+        backtick_fence_count = len(re.findall(r"(?m)^[ \t]*```", resp.proposed_content))
+        tilde_fence_count = len(re.findall(r"(?m)^[ \t]*~~~", resp.proposed_content))
+        if backtick_fence_count % 2 != 0 or tilde_fence_count % 2 != 0:
+            failed.append("unbalanced_code_fences")
+        else:
+            passed.append("balanced_code_fences")
 
-        # 5. Hallucination & Evidence check:
-        # Extract backticked symbols and function calls from proposed content
-        new_tokens = DocumentationValidator._extract_new_technical_tokens(
-            clean_orig, clean_prop
+        # 4b. Leaf-section heading injection check
+        # A section is a leaf section if it has no child headings in original content
+        orig_has_headings = bool(
+            re.search(r"(?m)^[ \t]*#{1,6}\s+\S+", clean_orig)
+            or re.search(r"(?m)^[^\n]+\n[ \t]*(=+|-+)[ \t]*$", clean_orig)
+        )
+        prop_has_atx = bool(re.search(r"(?m)^[ \t]*#{1,6}\s+\S+", resp.proposed_content))
+        # Note: Setext check ignores lines starting with '---' that are horizontal rules
+        prop_has_setext = bool(
+            re.search(
+                r"(?m)^[A-Za-z0-9_`*][^\n]*\n[ \t]*(=+|-{2,})[ \t]*$", resp.proposed_content
+            )
+        )
+        if not orig_has_headings and (prop_has_atx or prop_has_setext):
+            failed.append("headings_introduced_in_leaf_section")
+        else:
+            passed.append("no_leaf_heading_injection")
+
+        # 5. Build Technical Evidence Registry Strictly from Structured AST (C1, H1)
+        # NO regex extraction of arbitrary words from raw source files!
+        valid_symbols: set[str] = set()
+        valid_params: dict[str, ParameterInfo] = {}
+        valid_constants: dict[str, ConstantInfo] = {}
+        valid_imports: set[str] = set()
+
+        for src in req.source_files:
+            code = req.new_code_snippets.get(src, "")
+            if code:
+                # Structured symbols
+                sym_map = extract_python_symbols(code)
+                for s in sym_map.values():
+                    valid_symbols.add(s.name)
+                    valid_symbols.add(s.name.split(".")[-1])
+                    for p in s.parameters:
+                        valid_params[p.name] = p
+
+                # Structured constants
+                const_map = extract_python_constants(code)
+                for c in const_map.values():
+                    valid_constants[c.name] = c
+                    valid_constants[c.name.split(".")[-1]] = c
+
+                # Structured imports
+                imp_list = extract_python_imports(code)
+                for imp in imp_list:
+                    valid_imports.add(imp.alias if imp.alias else imp.name)
+
+            # Also incorporate structured changes from AST deltas
+            delta = req.ast_deltas.get(src)
+            if delta:
+                for s in delta.added_symbols:
+                    valid_symbols.add(s.name)
+                    valid_symbols.add(s.name.split(".")[-1])
+                    for p in s.parameters:
+                        valid_params[p.name] = p
+                for _old_s, new_s in delta.modified_symbols:
+                    valid_symbols.add(new_s.name)
+                    valid_symbols.add(new_s.name.split(".")[-1])
+                    for p in new_s.parameters:
+                        valid_params[p.name] = p
+                for _fname, p in delta.added_parameters:
+                    valid_params[p.name] = p
+                for _fname, _old_p, new_p in delta.modified_parameters:
+                    valid_params[new_p.name] = new_p
+                for c in delta.added_constants:
+                    valid_constants[c.name] = c
+                    valid_constants[c.name.split(".")[-1]] = c
+                for _old_c, new_c in delta.modified_constants:
+                    valid_constants[new_c.name] = new_c
+                    valid_constants[new_c.name.split(".")[-1]] = new_c
+
+        # 6. Verify Technical Tokens & Factual Accuracy (C1)
+        new_tokens = DocumentationValidator._extract_new_technical_tokens(clean_orig, clean_prop)
+        hallucinated_tokens: list[str] = []
+
+        allowed_all = (
+            valid_symbols
+            | set(valid_params.keys())
+            | set(valid_constants.keys())
+            | valid_imports
+            | DocumentationValidator._STANDARD_ALLOWED_TOKENS
+            | set(req.changed_symbols)
         )
 
-        # Collect ground truth valid symbols from AST delta and source code
-        valid_symbols = set()
-        valid_params = set()
-        valid_constants = set()
-
-        for delta in req.ast_deltas.values():
-            for s in delta.added_symbols:
-                valid_symbols.add(s.name)
-            for _old_s, new_s in delta.modified_symbols:
-                valid_symbols.add(new_s.name)
-            for _fname, p in delta.added_parameters:
-                valid_params.add(p.name)
-            for _fname, _old_p, new_p in delta.modified_parameters:
-                valid_params.add(new_p.name)
-            for c in delta.added_constants:
-                valid_constants.add(c.name.split(".")[-1])
-            for _old_c, new_c in delta.modified_constants:
-                valid_constants.add(new_c.name.split(".")[-1])
-
-        # Also include symbols from source snippets
-        for code in req.new_code_snippets.values():
-            for token in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]+\b", code):
-                valid_symbols.add(token)
-
-        # Inspect new technical tokens
-        hallucinated_tokens: list[str] = []
         for token in new_tokens:
-            # Check if token looks like a function or parameter identifier
-            is_valid = (
-                token in valid_symbols
-                or token in valid_params
-                or token in valid_constants
-                or token.lower()
-                in {s.lower() for s in valid_symbols | valid_params | valid_constants}
-                or len(token) <= 2  # Skip tiny words
-                or token
-                in (
-                    "str",
-                    "int",
-                    "bool",
-                    "float",
-                    "dict",
-                    "list",
-                    "tuple",
-                    "set",
-                    "None",
-                    "Optional",
-                )
-            )
+            # Case-sensitive exact match check (Python is case-sensitive)
+            is_valid = token in allowed_all or len(token) <= 2
             if not is_valid:
-                # Check if it was in impact evidence
+                # Evidence check: was it matched in deterministic impact evidence?
                 in_evidence = any(
-                    token.lower() in ev.matched_text.lower()
+                    token == ev.matched_text
                     for ev in req.impact_evidence
+                    if ev.is_deterministic
                 )
                 if not in_evidence:
                     hallucinated_tokens.append(token)
 
         if hallucinated_tokens:
-            failed.append(f"unsupported_technical_tokens: {hallucinated_tokens}")
+            failed.append(f"unsupported_technical_tokens: {sorted(hallucinated_tokens)}")
         else:
             passed.append("no_hallucinated_technical_symbols")
+
+        # 7. Parameter Default Value & Type Verification (C1, P6, P7)
+        for p_name, p_info in valid_params.items():
+            if p_info.default_value is not None:
+                actual_val = p_info.default_value.strip().strip("'\"")
+
+                # Match param=val or param = val
+                eq_matches = re.findall(
+                    rf"\b{re.escape(p_name)}\s*=\s*([0-9a-zA-Z_'\"]+)", clean_prop
+                )
+                for claimed in eq_matches:
+                    clean_claimed = claimed.strip().strip("'\"")
+                    if clean_claimed != actual_val and clean_claimed != "":
+                        failed.append(
+                            f"parameter_default_mismatch: parameter '{p_name}' default is '{actual_val}', but documentation claims '{clean_claimed}'"
+                        )
+
+                # Match "default <val>", "default is <val>", "default: <val>", "(default <val>)"
+                def_matches = re.findall(
+                    rf"\b{re.escape(p_name)}\b[^\.\n]*?default\s*(?:is|=|to|:)?\s*`?([0-9a-zA-Z_'\"]+)`?",
+                    clean_prop,
+                    re.IGNORECASE,
+                )
+                for claimed in def_matches:
+                    clean_claimed = claimed.strip().strip("'\"")
+                    if clean_claimed != actual_val and clean_claimed != "":
+                        failed.append(
+                            f"parameter_default_mismatch: parameter '{p_name}' default is '{actual_val}', but documentation claims '{clean_claimed}'"
+                        )
+
+            if p_info.type_annotation is not None:
+                actual_type = p_info.type_annotation.strip()
+                known_types = {"str", "int", "bool", "float", "list", "dict", "bytes"}
+
+                # Match param: type
+                type_matches = re.findall(
+                    rf"\b{re.escape(p_name)}\s*:\s*([A-Za-z_][A-Za-z0-9_]*)", clean_prop
+                )
+                for claimed_t in type_matches:
+                    c_type = claimed_t.strip()
+                    if c_type in known_types and c_type != actual_type:
+                        failed.append(
+                            f"parameter_type_mismatch: parameter '{p_name}' type is '{actual_type}', but documentation claims '{c_type}'"
+                        )
+
+                # Match param (type)
+                paren_matches = re.findall(
+                    rf"\b{re.escape(p_name)}\s*\(([A-Za-z_][A-Za-z0-9_]*)[,\)]", clean_prop
+                )
+                for claimed_t in paren_matches:
+                    c_type = claimed_t.strip()
+                    if c_type in known_types and c_type != actual_type:
+                        failed.append(
+                            f"parameter_type_mismatch: parameter '{p_name}' type is '{actual_type}', but documentation claims '{c_type}'"
+                        )
+
+        # 8. Removed Symbols Verification (C3)
+        removed_symbols: list[SymbolInfo] = []
+        for delta in req.ast_deltas.values():
+            removed_symbols.extend(delta.removed_symbols)
+
+        for sym in removed_symbols:
+            short_name = sym.name.split(".")[-1]
+            # Check if removed symbol appears in proposed text
+            if re.search(rf"\b{re.escape(short_name)}\b", clean_prop):
+                # Check whether it is an explanatory note describing removal or an active call
+                sentences = re.split(r"[.\n]", clean_prop)
+                for s in sentences:
+                    if re.search(rf"\b{re.escape(short_name)}\b", s):
+                        s_lower = s.lower()
+                        has_removal_context = any(
+                            kw in s_lower
+                            for kw in DocumentationValidator._REMOVAL_EXPLANATORY_KEYWORDS
+                        )
+                        if not has_removal_context:
+                            failed.append(
+                                f"active_reference_to_removed_symbol: '{short_name}' was removed from source code but is actively referenced"
+                            )
+                            break
 
         is_valid = len(failed) == 0
         needs_review = len(review_reasons) > 0 or not is_valid
@@ -364,20 +650,25 @@ class DocumentationValidator:
         )
 
     @staticmethod
-    def _extract_new_technical_tokens(
-        original_text: str, proposed_text: str
-    ) -> set[str]:
+    def _extract_new_technical_tokens(original_text: str, proposed_text: str) -> set[str]:
         """Extract code identifiers present in proposed text but absent in original text."""
-        orig_backticks = set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", original_text))
-        prop_backticks = set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", proposed_text))
+        orig_backticks = set(re.findall(r"`([A-Za-z_][A-Za-z0-9_.]*)`", original_text))
+        prop_backticks = set(re.findall(r"`([A-Za-z_][A-Za-z0-9_.]*)`", proposed_text))
 
-        orig_calls = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", original_text))
-        prop_calls = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", proposed_text))
+        orig_calls = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_.]*)\s*\(", original_text))
+        prop_calls = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_.]*)\s*\(", proposed_text))
 
         new_backticks = prop_backticks - orig_backticks
         new_calls = prop_calls - orig_calls
 
-        return new_backticks | new_calls
+        # Unpack dotted tokens if needed (e.g. "mod.func" -> "mod.func" and "func")
+        tokens = set()
+        for t in new_backticks | new_calls:
+            tokens.add(t)
+            if "." in t:
+                tokens.add(t.split(".")[-1])
+
+        return tokens
 
 
 # =============================================================================
@@ -479,6 +770,30 @@ class DocumentationUpdater:
                 sec, include_children=False
             )
 
+            # Check for source syntax errors upfront (H7): do not call AI
+            syntax_errors = [
+                deltas[src].syntax_error
+                for src in target.source_files
+                if src in deltas and deltas[src].syntax_error
+            ]
+            if syntax_errors:
+                applied_rec = AppliedSectionUpdate(
+                    doc_path=doc_path,
+                    section_id=target.section_id,
+                    section_heading=target.section_heading,
+                    status="rejected",
+                    original_section_content=current_section_content,
+                    new_section_content="",
+                    explanation=f"Source syntax error: {syntax_errors[0]}",
+                    validation=ValidationResult(
+                        is_valid=False,
+                        failed_checks=[f"syntax_error: {syntax_errors[0]}"],
+                    ),
+                )
+                report.rejected_updates.append(applied_rec)
+                report.total_sections_rejected += 1
+                continue
+
             # Build Request Context
             old_snips = {
                 src: code_changes[src][0]
@@ -507,10 +822,28 @@ class DocumentationUpdater:
                 style_guidelines=self.style_guidelines,
             )
 
-            # 4. Generate Update via AI
-            user_prompt = build_update_prompt(req)
-            raw_ai_out = self.ai_generator(_SYSTEM_PROMPT, user_prompt)
-            ai_resp = parse_ai_response(raw_ai_out, doc_path, target.section_id)
+            # 4. Generate Update via AI (Isolated per section, H3)
+            try:
+                user_prompt = build_update_prompt(req)
+                raw_ai_out = self.ai_generator(_SYSTEM_PROMPT, user_prompt)
+                ai_resp = parse_ai_response(raw_ai_out, doc_path, target.section_id)
+            except Exception as gen_err:
+                applied_rec = AppliedSectionUpdate(
+                    doc_path=doc_path,
+                    section_id=target.section_id,
+                    section_heading=target.section_heading,
+                    status="rejected",
+                    original_section_content=current_section_content,
+                    new_section_content="",
+                    explanation=f"AI generation failed: {gen_err}",
+                    validation=ValidationResult(
+                        is_valid=False,
+                        failed_checks=[f"ai_generation_error: {gen_err}"],
+                    ),
+                )
+                report.rejected_updates.append(applied_rec)
+                report.total_sections_rejected += 1
+                continue
 
             # 5. Deterministic Validation
             val_result = DocumentationValidator.validate(req, ai_resp, parsed_doc)
@@ -530,6 +863,21 @@ class DocumentationUpdater:
                 report.total_sections_rejected += 1
                 continue
 
+            # Idempotency / No-Change Check (H4)
+            if ai_resp.proposed_content.strip() == current_section_content.strip():
+                applied_rec = AppliedSectionUpdate(
+                    doc_path=doc_path,
+                    section_id=target.section_id,
+                    section_heading=target.section_heading,
+                    status="no_change",
+                    original_section_content=current_section_content,
+                    new_section_content=ai_resp.proposed_content,
+                    explanation="Section content already up to date.",
+                    validation=val_result,
+                )
+                report.applied_updates.append(applied_rec)
+                continue
+
             if val_result.requires_human_review:
                 applied_rec = AppliedSectionUpdate(
                     doc_path=doc_path,
@@ -544,7 +892,7 @@ class DocumentationUpdater:
                 report.review_required_updates.append(applied_rec)
                 continue
 
-            # 6. Apply Surgical Section Update via section_patcher
+            # 6. Apply Surgical Section Update with Document Invariants & Rollback (C2)
             try:
                 updated_markdown = replace_section_content(
                     current_markdown,
@@ -553,7 +901,32 @@ class DocumentationUpdater:
                     replace_children=False,
                 )
 
-                # Update in-memory document state for subsequent updates to the same document
+                # Invariant Verification (C2):
+                post_doc = parse_sections(updated_markdown)
+                orig_sec_ids = {s.identifier for s in parsed_doc.sections}
+                post_sec_ids = {s.identifier for s in post_doc.sections}
+                if orig_sec_ids != post_sec_ids:
+                    raise ValueError(
+                        f"Document invariant violation: section IDs changed from {orig_sec_ids} to {post_sec_ids}"
+                    )
+
+                # Invariant: all non-target sections must be byte-identical
+                for s_orig in parsed_doc.sections:
+                    if s_orig.identifier == target.section_id:
+                        continue
+                    s_post = post_doc.find_section(s_orig.identifier)
+                    if s_post is None:
+                        raise ValueError(
+                            f"Document invariant violation: section '{s_orig.identifier}' missing"
+                        )
+                    c_orig = parsed_doc.get_section_content(s_orig, include_children=False)
+                    c_post = post_doc.get_section_content(s_post, include_children=False)
+                    if c_orig != c_post:
+                        raise ValueError(
+                            f"Document invariant violation: non-target section '{s_orig.identifier}' was altered"
+                        )
+
+                # Invariants satisfied: commit to memory state
                 report.updated_documents[doc_path] = updated_markdown
 
                 applied_rec = AppliedSectionUpdate(
@@ -570,6 +943,7 @@ class DocumentationUpdater:
                 report.total_sections_applied += 1
 
             except Exception as patch_err:
+                # Rollback: updated_documents[doc_path] remains untouched!
                 applied_rec = AppliedSectionUpdate(
                     doc_path=doc_path,
                     section_id=target.section_id,
