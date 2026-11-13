@@ -176,7 +176,7 @@ class TestT7T8TransactionHardened:
                 }
             )
 
-        updater = DocumentationUpdater(ai_generator=mock_ai, docs_root=tmp_path)
+        updater = DocumentationUpdater(ai_generator=mock_ai)
 
         fail_bak_unlink = True
         real_unlink = Path.unlink

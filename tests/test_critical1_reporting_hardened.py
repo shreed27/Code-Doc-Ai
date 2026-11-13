@@ -72,7 +72,7 @@ class TestCritical1ReportingHardened:
                 )
             return json.dumps({"proposed_content": "No change", "requires_human_review": True})
 
-        updater = DocumentationUpdater(ai_generator=mock_ai, docs_root=tmp_path)
+        updater = DocumentationUpdater(ai_generator=mock_ai)
         report = updater.update_documentation(
             code_changes={
                 "src/broken.py": (broken_old, broken_new),
