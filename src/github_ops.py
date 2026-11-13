@@ -7,6 +7,8 @@ and pushing/creating PRs in the documentation repo.
 
 import os
 import subprocess
+from dataclasses import dataclass
+from pathlib import Path
 
 from config import get_branch_name, get_docs_repo_url, get_pr_title_prefix
 from security_utils import (
@@ -15,6 +17,128 @@ from security_utils import (
     setup_git_credentials,
     validate_docs_subfolder,
 )
+
+
+@dataclass
+class SourceFileChange:
+    """Represents a source file change extracted from git."""
+
+    path: str
+    old_path: str
+    status: str  # "added", "modified", "deleted", "renamed"
+    old_code: str
+    new_code: str
+    error: str | None = None
+
+
+def get_changed_source_files(
+    repo_root: str | Path,
+    pr_base: str = "origin/main",
+) -> dict[str, SourceFileChange]:
+    """
+    Extract changed source files using git diff -M --raw anchored at repo_root.
+
+    Never relies on current working directory. Correctly tracks additions,
+    modifications, deletions, and renames between the merge-base and HEAD.
+    Returns structured errors rather than empty strings when files cannot be read.
+    """
+    root = Path(repo_root).resolve()
+    changes: dict[str, SourceFileChange] = {}
+
+    # 1. Resolve merge-base
+    merge_base_result = run_command_safe(
+        ["git", "merge-base", pr_base, "HEAD"], check=False, cwd=str(root)
+    )
+    if merge_base_result.returncode == 0 and merge_base_result.stdout.strip():
+        base_rev = merge_base_result.stdout.strip()
+    else:
+        base_rev = pr_base
+
+    # 2. Get raw diff with rename detection
+    raw_res = run_command_safe(
+        ["git", "diff", "-M", "--raw", f"{base_rev}...HEAD"], check=False, cwd=str(root)
+    )
+    if raw_res.returncode != 0:
+        raw_res = run_command_safe(
+            ["git", "diff", "-M", "--raw", base_rev, "HEAD"], check=False, cwd=str(root)
+        )
+
+    if raw_res.returncode != 0 or not raw_res.stdout.strip():
+        return changes
+
+    for line in raw_res.stdout.strip().splitlines():
+        if not line or not line.startswith(":"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        meta_parts = parts[0].split()
+        status_info = meta_parts[-1]
+        status_char = status_info[0]
+
+        if status_char == "R":
+            old_p = parts[1].strip()
+            new_p = parts[2].strip() if len(parts) > 2 else old_p
+            status = "renamed"
+        elif status_char == "A":
+            old_p = parts[1].strip()
+            new_p = parts[1].strip()
+            status = "added"
+        elif status_char == "D":
+            old_p = parts[1].strip()
+            new_p = parts[1].strip()
+            status = "deleted"
+        else:
+            old_p = parts[1].strip()
+            new_p = parts[1].strip()
+            status = "modified"
+
+        # Focus on python files
+        if not new_p.endswith(".py") and not old_p.endswith(".py"):
+            continue
+
+        old_code = ""
+        new_code = ""
+        error = None
+
+        # Read old version from base_rev
+        if status != "added":
+            old_git = run_command_safe(
+                ["git", "show", f"{base_rev}:{old_p}"], check=False, cwd=str(root)
+            )
+            if old_git.returncode == 0:
+                old_code = old_git.stdout
+            else:
+                error = f"Failed to retrieve revision {base_rev[:7]}:{old_p}: {old_git.stderr or 'git error'}"
+
+        # Read new version from working tree / HEAD
+        if status != "deleted" and error is None:
+            file_on_disk = root / new_p
+            if file_on_disk.is_file():
+                try:
+                    with open(file_on_disk, encoding="utf-8") as f:
+                        new_code = f.read()
+                except Exception as read_err:
+                    error = f"Failed to read file on disk at {file_on_disk}: {read_err}"
+            else:
+                new_git = run_command_safe(
+                    ["git", "show", f"HEAD:{new_p}"], check=False, cwd=str(root)
+                )
+                if new_git.returncode == 0:
+                    new_code = new_git.stdout
+                else:
+                    error = f"Failed to retrieve HEAD:{new_p}: {new_git.stderr or 'file not found'}"
+
+        changes[new_p] = SourceFileChange(
+            path=new_p,
+            old_path=old_p,
+            status=status,
+            old_code=old_code,
+            new_code=new_code,
+            error=error,
+        )
+
+    return changes
 
 
 def get_diff():
