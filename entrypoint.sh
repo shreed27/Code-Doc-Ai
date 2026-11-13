@@ -97,6 +97,11 @@ if [ "$DRY_RUN" = "true" ]; then
   echo "🔍 Running in dry-run mode"
 fi
 
+if [ "$ENABLE_SECTION_UPDATER" = "true" ]; then
+  ARGS="$ARGS --enable-section-updater"
+  echo "⚡ Section-level AST updater enabled"
+fi
+
 echo "📊 Environment:"
 echo "  PR_NUMBER: $PR_NUMBER"
 echo "  PR_BASE: $PR_BASE" 

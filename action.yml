@@ -73,6 +73,10 @@ inputs:
     description: 'Path to a Markdown style configuration file (.md) containing documentation style guidelines. If not set, auto-detects .code-to-docs/style.md in the repository root.'
     required: false
     default: ''
+  enable-section-updater:
+    description: 'Enable the Phase 3 AST and section-level documentation updating engine'
+    required: false
+    default: 'false'
 
 outputs:
   status:
@@ -104,3 +108,4 @@ runs:
     GOOGLE_SA_KEY: ${{ inputs.google-sa-key }}
     MAX_CONTEXT_CHARS: ${{ inputs.max-context-chars }}
     STYLE_CONFIG_PATH: ${{ inputs.style-config-path }}
+    ENABLE_SECTION_UPDATER: ${{ inputs.enable-section-updater }}

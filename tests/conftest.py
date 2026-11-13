@@ -2,6 +2,11 @@
 
 import os
 import sys
+from unittest.mock import MagicMock
+
+# Stub optional external dependencies
+sys.modules.setdefault("mcp", MagicMock())
+sys.modules.setdefault("mcp.client.stdio", MagicMock())
 
 import pytest
 

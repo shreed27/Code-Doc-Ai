@@ -236,6 +236,12 @@ def main():
         default=5,
         help="Max parallel workers for update generation (default: 5)",
     )
+    parser.add_argument(
+        "--enable-section-updater",
+        action="store_true",
+        default=False,
+        help="Enable Phase 3 AST and section-level documentation updating engine",
+    )
     args = parser.parse_args()
 
     # Log context budget once at startup
@@ -532,7 +538,53 @@ def main():
     files_with_content = []
     modified_files = []
 
-    if args.parallel_updates and len(relevant_files) > 1:
+    enable_section_updater = getattr(args, "enable_section_updater", False) or (
+        os.environ.get("ENABLE_SECTION_UPDATER", "").strip().lower() in ("true", "1", "yes")
+    )
+
+    if enable_section_updater:
+        print("Using section-level AST documentation updater...")
+        from doc_updater import DocumentationUpdater, atomic_overwrite_file
+
+        # Extract Python file changes from diff
+        code_changes = {}
+        py_files = set(re.findall(r"diff --git a/(\S+\.py) b/\S+\.py", diff))
+        pr_base_ref = os.environ.get("PR_BASE", "origin/main")
+        for py_path in py_files:
+            old_code = ""
+            new_code = ""
+            res = run_command_safe(["git", "show", f"{pr_base_ref}:{py_path}"], check=False)
+            if res.returncode == 0:
+                old_code = res.stdout
+            if os.path.exists(py_path):
+                try:
+                    with open(py_path, "r", encoding="utf-8") as f:
+                        new_code = f.read()
+                except OSError:
+                    pass
+            code_changes[py_path] = (old_code, new_code)
+
+        # Load documentation files
+        docs_map = {}
+        for file_path in relevant_files:
+            content = load_full_content(file_path)
+            if content:
+                docs_map[file_path] = content
+
+        updater = DocumentationUpdater(style_guidelines=style_guidelines)
+        report = updater.update_documentation(code_changes, docs_map)
+
+        for file_path, orig_text in docs_map.items():
+            updated_text = report.updated_documents.get(file_path, orig_text)
+            if updated_text != orig_text:
+                files_with_content.append((file_path, orig_text, updated_text))
+                if update_mode and not args.dry_run:
+                    print(f"Updating {file_path} (atomic section update)...")
+                    if atomic_overwrite_file(file_path, updated_text):
+                        modified_files.append(file_path)
+                elif args.dry_run:
+                    print(f"[Dry Run] Would update {file_path}")
+    elif args.parallel_updates and len(relevant_files) > 1:
         print(f"Generating updates in parallel (max {args.max_workers} workers)...")
         files_with_content = generate_updates_parallel(
             diff,
