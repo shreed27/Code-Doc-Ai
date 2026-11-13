@@ -194,6 +194,9 @@ class TestOutboundModelRedactionWrapper:
             "planted_db_pass_12345",
             "planted_client_secret_67890",
             "planted_api_key_abcde",
+            "planted_password_secret_pass",
+            "planted_x_api_key_header_val",
+            "dXNlcjpwYXNzMTIzNDU2",
         ]
 
         def fake_create(*args, **kwargs):
@@ -211,6 +214,9 @@ class TestOutboundModelRedactionWrapper:
             f"DB_PASSWORD={planted_secrets[0]}\n"
             f"client_secret: {planted_secrets[1]}\n"
             f"api_key = {planted_secrets[2]}\n"
+            f"credentials:\n  password: {planted_secrets[3]}\n"
+            f"Headers:\nX-API-Key: {planted_secrets[4]}\n"
+            f'{{"Authorization": "Basic {planted_secrets[5]}"}}\n'
         )
         wrapper.chat.completions.create(
             model="gpt-4o",

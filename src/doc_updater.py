@@ -647,7 +647,7 @@ def is_already_documented(current_content: str, req: SectionUpdateRequest) -> bo
                 new_ret_clean = new_ret.strip().strip("'\"")
                 bound_to_old = bool(
                     re.search(
-                        rf"\b{re.escape(f_name)}\b[^\.\n]*?(?:returns|returning|return value is)\s+(?:a\s+)?`?{re.escape(old_ret_clean)}\b",
+                        rf"\b{re.escape(f_name)}\b[^\.\n]*?(?:returns|returning|return value is)\s+(?:an?\s+)?`?{re.escape(old_ret_clean)}\b",
                         current_content,
                         re.IGNORECASE,
                     )
@@ -657,7 +657,7 @@ def is_already_documented(current_content: str, req: SectionUpdateRequest) -> bo
 
                 bound_to_new = bool(
                     re.search(
-                        rf"\b{re.escape(f_name)}\b[^\.\n]*?(?:returns|returning|return value is)\s+(?:a\s+)?`?{re.escape(new_ret_clean)}\b",
+                        rf"\b{re.escape(f_name)}\b[^\.\n]*?(?:returns|returning|return value is)\s+(?:an?\s+)?`?{re.escape(new_ret_clean)}\b",
                         current_content,
                         re.IGNORECASE,
                     )
@@ -923,8 +923,6 @@ def build_update_prompt(
             raise ContextBudgetExceededError(
                 f"Request serialized size ({final_size:,} bytes) exceeds context budget ({max_context_chars:,} bytes)."
             )
-
-    return full_prompt
 
     return full_prompt
 
@@ -1617,12 +1615,12 @@ class DocumentationValidator:
         for f_name, ret_type in fact_extractor.func_returns.items():
             if ret_type:
                 ret_matches = re.findall(
-                    rf"\b{re.escape(f_name)}\b[^\.\n]*?(?:returns|returning|return value is)\s+(?:a\s+)?([A-Za-z_][A-Za-z0-9_\[\], ]*)",
+                    rf"\b{re.escape(f_name)}\b[^\.\n]*?(?:returns|returning|return value is)\s+(?:an?\s+)?`?([A-Za-z_][A-Za-z0-9_\[\], ]*?)`?(?:[.\s]|$)",
                     clean_prop,
                     re.IGNORECASE,
                 )
                 for claimed_ret in ret_matches:
-                    c_ret = claimed_ret.strip().strip("'\"")
+                    c_ret = claimed_ret.strip().strip("'\"`")
                     alias_actual = fact_extractor.type_aliases.get(ret_type, ret_type)
                     alias_claimed = fact_extractor.type_aliases.get(c_ret, c_ret)
                     matches = (
