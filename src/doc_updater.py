@@ -249,8 +249,12 @@ class DocumentationValidator:
             review_reasons.append(resp.review_reason or "AI requested human review.")
 
         if resp.uncertainties:
-            warnings.append(f"AI reported uncertainties: {', '.join(resp.uncertainties)}")
-            review_reasons.append(f"Uncertainties noted: {', '.join(resp.uncertainties)}")
+            warnings.append(
+                f"AI reported uncertainties: {', '.join(resp.uncertainties)}"
+            )
+            review_reasons.append(
+                f"Uncertainties noted: {', '.join(resp.uncertainties)}"
+            )
 
         # 3. Empty content check
         clean_prop = resp.proposed_content.strip()
@@ -258,7 +262,9 @@ class DocumentationValidator:
         if not clean_prop and clean_orig:
             # If the original had content and proposal is completely empty without explanation
             warnings.append("proposed_content_is_empty")
-            review_reasons.append("Proposed content is empty while original section had text.")
+            review_reasons.append(
+                "Proposed content is empty while original section had text."
+            )
         else:
             passed.append("non_empty_content")
 
@@ -278,7 +284,9 @@ class DocumentationValidator:
 
         # 5. Hallucination & Evidence check:
         # Extract backticked symbols and function calls from proposed content
-        new_tokens = DocumentationValidator._extract_new_technical_tokens(clean_orig, clean_prop)
+        new_tokens = DocumentationValidator._extract_new_technical_tokens(
+            clean_orig, clean_prop
+        )
 
         # Collect ground truth valid symbols from AST delta and source code
         valid_symbols = set()
@@ -332,7 +340,8 @@ class DocumentationValidator:
             if not is_valid:
                 # Check if it was in impact evidence
                 in_evidence = any(
-                    token.lower() in ev.matched_text.lower() for ev in req.impact_evidence
+                    token.lower() in ev.matched_text.lower()
+                    for ev in req.impact_evidence
                 )
                 if not in_evidence:
                     hallucinated_tokens.append(token)
@@ -355,7 +364,9 @@ class DocumentationValidator:
         )
 
     @staticmethod
-    def _extract_new_technical_tokens(original_text: str, proposed_text: str) -> set[str]:
+    def _extract_new_technical_tokens(
+        original_text: str, proposed_text: str
+    ) -> set[str]:
         """Extract code identifiers present in proposed text but absent in original text."""
         orig_backticks = set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", original_text))
         prop_backticks = set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", proposed_text))
@@ -427,7 +438,9 @@ class DocumentationUpdater:
         else:
             raw_impacts = []
             for src_path, (old_src, new_src) in code_changes.items():
-                file_impacts = self.mapper.map_file_impacts(old_src, new_src, src_path, parsed_docs)
+                file_impacts = self.mapper.map_file_impacts(
+                    old_src, new_src, src_path, parsed_docs
+                )
                 raw_impacts.extend(file_impacts)
 
         # Consolidate impacts to avoid duplicate section updates
@@ -462,14 +475,20 @@ class DocumentationUpdater:
                 report.total_sections_rejected += 1
                 continue
 
-            current_section_content = parsed_doc.get_section_content(sec, include_children=False)
+            current_section_content = parsed_doc.get_section_content(
+                sec, include_children=False
+            )
 
             # Build Request Context
             old_snips = {
-                src: code_changes[src][0] for src in target.source_files if src in code_changes
+                src: code_changes[src][0]
+                for src in target.source_files
+                if src in code_changes
             }
             new_snips = {
-                src: code_changes[src][1] for src in target.source_files if src in code_changes
+                src: code_changes[src][1]
+                for src in target.source_files
+                if src in code_changes
             }
 
             req = SectionUpdateRequest(

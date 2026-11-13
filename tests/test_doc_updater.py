@@ -153,7 +153,9 @@ Call `legacy_handler` to process v1 requests.
         new_code = "def export_data(format: str, compress: bool = True): pass"
 
         doc1 = "# User Guide\n\n## Exporting\nRun `export_data`."
-        doc2 = "# API Reference\n\n## Export Details\nThe `export_data` function details."
+        doc2 = (
+            "# API Reference\n\n## Export Details\nThe `export_data` function details."
+        )
 
         def multi_mock(_sys, user_prompt: str) -> str:
             if "docs/guide.md" in user_prompt:
@@ -215,7 +217,9 @@ Check logs at `/var/log/app.log`.
             "# Application\n\n## Overview\nThis is an untouched overview paragraph with exact spacing.\n\n## Getting Started"
         )
         # Suffix check
-        assert updated_text.endswith("## Troubleshooting\nCheck logs at `/var/log/app.log`.\n")
+        assert updated_text.endswith(
+            "## Troubleshooting\nCheck logs at `/var/log/app.log`.\n"
+        )
 
     def test_nested_markdown_sections_are_preserved(self):
         old_code = "def init_cluster(): pass"
@@ -538,7 +542,9 @@ class TestPromptAndResponseHelpers:
             reason="Fake reason",
         )
 
-        updater = DocumentationUpdater(ai_generator=make_mock_ai({"proposed_content": "xyz"}))
+        updater = DocumentationUpdater(
+            ai_generator=make_mock_ai({"proposed_content": "xyz"})
+        )
         report = updater.update_documentation(
             code_changes={"src/fake.py": ("x=1", "x=2")},
             documents={"doc.md": "# Doc\nContent"},
