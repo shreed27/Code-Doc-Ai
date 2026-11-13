@@ -268,9 +268,9 @@ def parse_ai_response(
             doc_path=expected_doc_path,
             section_id=expected_section_id,
             proposed_content=raw_response.strip(),
-            explanation=f"Malformed JSON: {exc}",
+            explanation=f"AI produced unstructured text: {exc}",
             requires_human_review=True,
-            review_reason=f"AI response is not valid JSON ({exc}); flagged for review.",
+            review_reason=f"AI response could not be parsed as structured JSON ({exc}); flagged for review.",
         )
 
     if not isinstance(data, dict):
@@ -471,6 +471,7 @@ class DocumentationValidator:
         )
         if not orig_has_headings and (prop_has_atx or prop_has_setext):
             failed.append("headings_introduced_in_leaf_section")
+            warnings.append("subheadings_introduced_in_leaf_section")
         else:
             passed.append("no_leaf_heading_injection")
 
@@ -544,11 +545,10 @@ class DocumentationValidator:
             # Case-sensitive exact match check (Python is case-sensitive)
             is_valid = token in allowed_all or len(token) <= 2
             if not is_valid:
-                # Evidence check: was it matched in deterministic impact evidence?
+                # Evidence check: was it matched in impact evidence?
                 in_evidence = any(
                     token == ev.matched_text
                     for ev in req.impact_evidence
-                    if ev.is_deterministic
                 )
                 if not in_evidence:
                     hallucinated_tokens.append(token)
@@ -848,21 +848,6 @@ class DocumentationUpdater:
             # 5. Deterministic Validation
             val_result = DocumentationValidator.validate(req, ai_resp, parsed_doc)
 
-            if not val_result.is_valid:
-                applied_rec = AppliedSectionUpdate(
-                    doc_path=doc_path,
-                    section_id=target.section_id,
-                    section_heading=target.section_heading,
-                    status="rejected",
-                    original_section_content=current_section_content,
-                    new_section_content=ai_resp.proposed_content,
-                    explanation=ai_resp.explanation or "Failed validation checks.",
-                    validation=val_result,
-                )
-                report.rejected_updates.append(applied_rec)
-                report.total_sections_rejected += 1
-                continue
-
             # Idempotency / No-Change Check (H4)
             if ai_resp.proposed_content.strip() == current_section_content.strip():
                 applied_rec = AppliedSectionUpdate(
@@ -876,6 +861,35 @@ class DocumentationUpdater:
                     validation=val_result,
                 )
                 report.applied_updates.append(applied_rec)
+                continue
+
+            if ai_resp.requires_human_review:
+                applied_rec = AppliedSectionUpdate(
+                    doc_path=doc_path,
+                    section_id=target.section_id,
+                    section_heading=target.section_heading,
+                    status="review_required",
+                    original_section_content=current_section_content,
+                    new_section_content=ai_resp.proposed_content,
+                    explanation=ai_resp.explanation or "Update requires human review.",
+                    validation=val_result,
+                )
+                report.review_required_updates.append(applied_rec)
+                continue
+
+            if not val_result.is_valid:
+                applied_rec = AppliedSectionUpdate(
+                    doc_path=doc_path,
+                    section_id=target.section_id,
+                    section_heading=target.section_heading,
+                    status="rejected",
+                    original_section_content=current_section_content,
+                    new_section_content=ai_resp.proposed_content,
+                    explanation=ai_resp.explanation or "Failed validation checks.",
+                    validation=val_result,
+                )
+                report.rejected_updates.append(applied_rec)
+                report.total_sections_rejected += 1
                 continue
 
             if val_result.requires_human_review:
@@ -903,8 +917,8 @@ class DocumentationUpdater:
 
                 # Invariant Verification (C2):
                 post_doc = parse_sections(updated_markdown)
-                orig_sec_ids = {s.identifier for s in parsed_doc.sections}
-                post_sec_ids = {s.identifier for s in post_doc.sections}
+                orig_sec_ids = {s.id for s in parsed_doc.sections}
+                post_sec_ids = {s.id for s in post_doc.sections}
                 if orig_sec_ids != post_sec_ids:
                     raise ValueError(
                         f"Document invariant violation: section IDs changed from {orig_sec_ids} to {post_sec_ids}"
@@ -912,18 +926,18 @@ class DocumentationUpdater:
 
                 # Invariant: all non-target sections must be byte-identical
                 for s_orig in parsed_doc.sections:
-                    if s_orig.identifier == target.section_id:
+                    if s_orig.id == target.section_id:
                         continue
-                    s_post = post_doc.find_section(s_orig.identifier)
+                    s_post = post_doc.find_section(s_orig.id)
                     if s_post is None:
                         raise ValueError(
-                            f"Document invariant violation: section '{s_orig.identifier}' missing"
+                            f"Document invariant violation: section '{s_orig.id}' missing"
                         )
                     c_orig = parsed_doc.get_section_content(s_orig, include_children=False)
                     c_post = post_doc.get_section_content(s_post, include_children=False)
                     if c_orig != c_post:
                         raise ValueError(
-                            f"Document invariant violation: non-target section '{s_orig.identifier}' was altered"
+                            f"Document invariant violation: non-target section '{s_orig.id}' was altered"
                         )
 
                 # Invariants satisfied: commit to memory state
