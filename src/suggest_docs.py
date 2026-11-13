@@ -629,12 +629,13 @@ def main():
 
         # Record any structured source analysis errors (Priority 1, N1)
         for p, err_msg in analysis_errors:
+            section_report.source_analysis_errors.append((p, err_msg))
             section_report.rejected_updates.append(
                 AppliedSectionUpdate(
                     doc_path=p,
                     section_id="source_analysis",
                     section_heading="Source Analysis",
-                    status="rejected",
+                    status="source_analysis_failed",
                     original_section_content="",
                     new_section_content="",
                     explanation=f"Source analysis failed: {err_msg}",
@@ -644,62 +645,80 @@ def main():
                     ),
                 )
             )
-            section_report.total_sections_rejected += 1
 
-        # 4. Multi-document transaction with rollback (Priority 3, N3)
-        # All-or-nothing: apply only if no rejections occurred
-        if (
-            section_report.total_sections_applied > 0
-            and section_report.total_sections_rejected == 0
-        ):
-            updates_to_write = {
-                f: section_report.updated_documents[f]
-                for f in md_files
-                if f in section_report.updated_documents
-                and section_report.updated_documents[f] != docs_map.get(f)
-            }
-            if updates_to_write:
-                for f, new_text in updates_to_write.items():
-                    files_with_content.append((f, docs_map[f], new_text))
+        # 4. Multi-document transaction with rollback (Priority 1 & Priority 6)
+        # Any document validation failures in the run prevent applying staged updates,
+        # but unrelated source analysis failures do NOT abort valid documentation updates for other files (Priority 1 & Critical-1).
+        has_doc_validation_rejections = any(
+            u.status == "rejected"
+            and not any(
+                k in f
+                for k in ["syntax_error", "source_analysis"]
+                for f in u.validation.failed_checks
+            )
+            for u in section_report.rejected_updates
+        )
 
-                if update_mode and not args.dry_run:
-                    print(
-                        f"Committing multi-document update ({len(updates_to_write)} file(s)) via transaction..."
-                    )
-                    try:
-                        tx = DocumentTransaction(docs_root=docs_root)
-                        tx.stage_updates(updates_to_write)
-                        tx.commit()
+        updates_to_write = {
+            f: section_report.updated_documents[f]
+            for f in md_files
+            if f in section_report.updated_documents
+            and section_report.updated_documents[f] != docs_map.get(f)
+        }
+
+        if updates_to_write and not has_doc_validation_rejections:
+            for f, new_text in updates_to_write.items():
+                files_with_content.append((f, docs_map[f], new_text))
+
+            if update_mode and not args.dry_run:
+                print(
+                    f"Committing multi-document update ({len(updates_to_write)} file(s)) via transaction..."
+                )
+                try:
+                    tx = DocumentTransaction(docs_root=docs_root)
+                    tx.stage_updates(updates_to_write)
+                    tx.commit()
+                    if tx.committed:
                         modified_files.extend(list(updates_to_write.keys()))
-                    except DocumentTransactionError as tx_err:
-                        print(f"Error during document transaction: {tx_err}")
-                        fail_rec = AppliedSectionUpdate(
-                            doc_path="transaction",
-                            section_id="transaction",
-                            section_heading="Transaction Integrity",
-                            status="transaction_failed",
-                            original_section_content="",
-                            new_section_content="",
-                            explanation=f"Transaction commit failed: {tx_err}",
-                            validation=ValidationResult(
-                                is_valid=False,
-                                failed_checks=[f"transaction_failed: {tx_err}"],
-                            ),
-                        )
-                        section_report.rejected_updates.append(fail_rec)
-                        if (review_mode or feature_mode) and not args.dry_run:
-                            post_review_comment(
-                                files_with_content,
-                                pr_number,
-                                commit_info,
-                                include_full_content=False,
-                                feature_section=feature_section,
-                                section_report=section_report,
-                            )
-                        sys.exit(1)
-                elif args.dry_run:
-                    for f in updates_to_write:
-                        print(f"[Dry Run] Would update {f}")
+                        # Populate committed_updates strictly upon transaction commit! (Priority 1)
+                        section_report.committed_updates = [
+                            u
+                            for u in section_report.applied_updates
+                            if u.status in ("applied", "updated")
+                        ]
+                    if tx.cleanup_warnings:
+                        print(f"Warning: Cleanup completed with warnings: {tx.cleanup_warnings}")
+                except DocumentTransactionError as tx_err:
+                    print(f"Error during document transaction: {tx_err}")
+                    fail_rec = AppliedSectionUpdate(
+                        doc_path="transaction",
+                        section_id="transaction",
+                        section_heading="Transaction Integrity",
+                        status="transaction_failed",
+                        original_section_content="",
+                        new_section_content="",
+                        explanation=f"Transaction commit failed: {tx_err}",
+                        validation=ValidationResult(
+                            is_valid=False,
+                            failed_checks=[f"transaction_failed: {tx_err}"],
+                        ),
+                    )
+                    section_report.transaction_failures.append(fail_rec)
+                    section_report.rejected_updates.append(fail_rec)
+                    section_report.committed_updates.clear()
+                    post_review_comment(
+                        [],
+                        pr_number,
+                        commit_info,
+                        include_full_content=False,
+                        feature_section=feature_section,
+                        section_report=section_report,
+                        review_mode=False,
+                    )
+                    sys.exit(1)
+            elif args.dry_run:
+                for f in updates_to_write:
+                    print(f"[Dry Run] Would update {f}")
 
         # 5. Process unsupported non-markdown docs via legacy path (Priority 6, N5)
         for file_path in non_md_files:
@@ -770,6 +789,7 @@ def main():
                 print(f"[Dry Run] Would update {file_path}")
 
     # Handle different modes
+    is_pure_review = review_mode and not update_mode
     if files_with_content:
         if (review_mode or feature_mode) and not args.dry_run:
             print(f"Posting review comment on PR #{pr_number}...")
@@ -780,6 +800,7 @@ def main():
                 include_full_content=False,
                 feature_section=feature_section,
                 section_report=section_report,
+                review_mode=is_pure_review,
             )
 
         if update_mode and modified_files:
@@ -867,100 +888,56 @@ def main():
 
             # Post confirmation comment for [update-docs]
             if update_mode and modified_files and not args.dry_run:
-                confirm_parts = []
-                show_as_suggestion = is_fork or push_failed
-                if show_as_suggestion:
-                    confirm_parts.append("## 📝 Suggested Documentation Changes")
+                if section_report:
+                    post_review_comment(
+                        files_with_content,
+                        pr_number,
+                        commit_info,
+                        include_full_content=False,
+                        feature_section=feature_section,
+                        section_report=section_report,
+                        review_mode=False,
+                    )
                 else:
-                    confirm_parts.append("## 📚 Documentation Update")
-                confirm_parts.append("")
-                if modified_files:
+                    confirm_parts = []
+                    show_as_suggestion = is_fork or push_failed
                     if show_as_suggestion:
-                        confirm_parts.append(
-                            f"Suggested updates for **{len(modified_files)} file(s)**:"
-                        )
-                    elif previous_review and previous_review["review_found"]:
-                        confirm_parts.append(
-                            f"Updated **{len(modified_files)} file(s)** based on your review selections:"
-                        )
+                        confirm_parts.append("## 📝 Suggested Documentation Changes")
                     else:
-                        confirm_parts.append(f"Updated **{len(modified_files)} file(s)**:")
+                        confirm_parts.append("## 📚 Documentation Update")
                     confirm_parts.append("")
-                    marker = "📄" if show_as_suggestion else "✅"
-                    for f in modified_files:
-                        confirm_parts.append(f"- {marker} `{f}`")
-                if previous_review and previous_review.get("rejected_files"):
-                    confirm_parts.append("")
-                    confirm_parts.append(
-                        f"Skipped **{len(previous_review['rejected_files'])} file(s)** (unchecked):"
-                    )
-                    confirm_parts.append("")
-                    for f in previous_review["rejected_files"]:
-                        confirm_parts.append(f"- ⏭️ `{f}`")
-                if modified_files:
-                    confirm_parts.append("")
-                    confirm_parts.append("### 📄 Changes")
-                    confirm_parts.append("")
-                    for file_path, original, updated in files_with_content:
-                        if file_path in modified_files:
-                            confirm_parts.append(f"#### `{file_path}`")
-                            confirm_parts.append("")
-                            confirm_parts.append("<details>")
-                            confirm_parts.append("<summary><b>View diff</b></summary>")
-                            confirm_parts.append("")
-                            diff_lines = list(
-                                difflib.unified_diff(
-                                    original.splitlines(keepends=True),
-                                    updated.splitlines(keepends=True),
-                                    fromfile=f"a/{file_path}",
-                                    tofile=f"b/{file_path}",
-                                    n=3,
-                                )
+                    if modified_files:
+                        if show_as_suggestion:
+                            confirm_parts.append(
+                                f"Suggested updates for **{len(modified_files)} file(s)**:"
                             )
-                            if diff_lines:
-                                confirm_parts.append("```diff")
-                                confirm_parts.append("".join(diff_lines))
-                                confirm_parts.append("```")
-                            confirm_parts.append("")
-                            confirm_parts.append("</details>")
-                            confirm_parts.append("")
-                    docs_subfolder = os.environ.get("DOCS_SUBFOLDER")
-                    if docs_subfolder and pr_merged and docs_pr_failed:
-                        confirm_parts.append(
-                            "Failed to create a docs PR. The changes are shown above for manual application."
+                        elif previous_review and previous_review["review_found"]:
+                            confirm_parts.append(
+                                f"Updated **{len(modified_files)} file(s)** based on your review selections:"
+                            )
+                        else:
+                            confirm_parts.append(f"Updated **{len(modified_files)} file(s)**:")
+                        confirm_parts.append("")
+                        marker = "📄" if show_as_suggestion else "✅"
+                        for f in modified_files:
+                            confirm_parts.append(f"- {marker} `{f}`")
+                    confirm_body = "\n".join(confirm_parts)
+                    confirm_file = Path("/tmp/update_confirm.md")
+                    confirm_file.write_text(confirm_body, encoding="utf-8")
+                    gh_token = os.environ.get("GH_TOKEN")
+                    if gh_token:
+                        run_command_safe(
+                            [
+                                "gh",
+                                "pr",
+                                "comment",
+                                str(pr_number),
+                                "--body-file",
+                                str(confirm_file),
+                            ],
+                            env={**os.environ, "GH_TOKEN": gh_token},
+                            check=False,
                         )
-                    elif docs_subfolder and pr_merged and docs_pr_url:
-                        confirm_parts.append(f"A docs PR has been created: {docs_pr_url}")
-                    elif docs_subfolder and pr_merged:
-                        confirm_parts.append("A docs PR has been created with these changes.")
-                    elif docs_subfolder and is_fork:
-                        confirm_parts.append(
-                            "This is a fork PR, so I can't push changes directly. "
-                            "The suggested changes are shown above for you to apply.\n\n"
-                            "Once this PR is merged, comment <code>&#91;update-docs]</code> again "
-                            "and I'll create a docs PR with these updates."
-                        )
-                    elif docs_subfolder and push_failed:
-                        confirm_parts.append(
-                            "Failed to push doc updates to this PR. "
-                            "The suggested changes are shown above for manual application."
-                        )
-                    elif docs_subfolder:
-                        confirm_parts.append("Doc updates have been committed to this PR.")
-                    else:
-                        confirm_parts.append(
-                            "A docs PR has been created/updated with these changes."
-                        )
-                confirm_body = "\n".join(confirm_parts)
-                confirm_file = Path("/tmp/update_confirm.md")
-                confirm_file.write_text(confirm_body, encoding="utf-8")
-                gh_token = os.environ.get("GH_TOKEN")
-                if gh_token:
-                    run_command_safe(
-                        ["gh", "pr", "comment", str(pr_number), "--body-file", str(confirm_file)],
-                        env={**os.environ, "GH_TOKEN": gh_token},
-                        check=False,
-                    )
 
         elif update_mode and not modified_files and not args.dry_run:
             if section_report and (
@@ -973,6 +950,7 @@ def main():
                     include_full_content=False,
                     feature_section=feature_section,
                     section_report=section_report,
+                    review_mode=False,
                 )
             else:
                 print("All documentation is already up to date — no PR created.")
@@ -986,6 +964,7 @@ def main():
                 include_full_content=False,
                 feature_section=feature_section,
                 section_report=section_report,
+                review_mode=is_pure_review,
             )
         else:
             print("All documentation is already up to date — no PR created.")

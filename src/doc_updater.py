@@ -580,7 +580,18 @@ def is_already_documented(current_content: str, req: SectionUpdateRequest) -> bo
                 if not re.search(rf"\b{re.escape(c_name)}\b", current_content):
                     return False
 
-    # 4. Check modified parameters:
+    # 4. Check added parameters:
+    for delta in req.ast_deltas.values():
+        for _fname, p in delta.added_parameters:
+            has_deltas = True
+            if not re.search(rf"\b{re.escape(p.name)}\b", current_content):
+                return False
+            if p.default_value is not None:
+                def_str = p.default_value.strip().strip("'\"")
+                if def_str and not re.search(rf"\b{re.escape(def_str)}\b", current_content):
+                    return False
+
+    # 5. Check modified parameters:
     for delta in req.ast_deltas.values():
         for _fname, old_p, new_p in delta.modified_parameters:
             has_deltas = True
@@ -592,7 +603,7 @@ def is_already_documented(current_content: str, req: SectionUpdateRequest) -> bo
             if old_def and new_def and old_def != new_def:
                 bound_to_old = bool(
                     re.search(
-                        rf"\b{re.escape(p_name)}\b[^\.\n]*?(?:defaults?\s*(?:is|=|to|:)|default:|\(default\s+|=)\s*`?{re.escape(old_def)}\b",
+                        rf"\b{re.escape(p_name)}\b[^\.\n]*?\b{re.escape(old_def)}\b",
                         current_content,
                         re.IGNORECASE,
                     )
@@ -602,7 +613,7 @@ def is_already_documented(current_content: str, req: SectionUpdateRequest) -> bo
 
                 bound_to_new = bool(
                     re.search(
-                        rf"\b{re.escape(p_name)}\b[^\.\n]*?(?:defaults?\s*(?:is|=|to|:)|default:|\(default\s+|=)\s*`?{re.escape(new_def)}\b",
+                        rf"\b{re.escape(p_name)}\b[^\.\n]*?\b{re.escape(new_def)}\b",
                         current_content,
                         re.IGNORECASE,
                     )
@@ -624,18 +635,14 @@ def is_already_documented(current_content: str, req: SectionUpdateRequest) -> bo
                 if bound_to_old_t:
                     return False
 
-    # 5. Check modified function return types (D5):
+    # 6. Check modified function return types (D5):
     for delta in req.ast_deltas.values():
         for old_s, new_s in delta.modified_symbols:
-            has_deltas = True
             f_name = new_s.name.split(".")[-1]
-            old_ret = getattr(old_s, "return_type", None) or (
-                old_s.signature.split("->")[-1].strip() if "->" in old_s.signature else None
-            )
-            new_ret = getattr(new_s, "return_type", None) or (
-                new_s.signature.split("->")[-1].strip() if "->" in new_s.signature else None
-            )
+            old_ret = getattr(old_s, "return_type", None)
+            new_ret = getattr(new_s, "return_type", None)
             if old_ret and new_ret and old_ret != new_ret:
+                has_deltas = True
                 old_ret_clean = old_ret.strip().strip("'\"")
                 new_ret_clean = new_ret.strip().strip("'\"")
                 bound_to_old = bool(
@@ -658,7 +665,7 @@ def is_already_documented(current_content: str, req: SectionUpdateRequest) -> bo
                 if not bound_to_new:
                     return False
 
-    # 6. Check added symbols:
+    # 7. Check added symbols:
     for delta in req.ast_deltas.values():
         for sym in delta.added_symbols:
             has_deltas = True
@@ -1496,7 +1503,7 @@ class DocumentationValidator:
             if not matching_entity:
                 if contradicting_val is not None:
                     failed.append(
-                        f"timeout_mismatch: source timeout is '{contradicting_val}', but documentation claims '{t_val}' (SLEEP or other constants cannot authorize timeout)"
+                        f"unsupported_numeric_claim: timeout mismatch: source timeout is '{contradicting_val}', but documentation claims '{t_val}' (SLEEP or other constants cannot authorize timeout)"
                     )
                 else:
                     review_reasons.append(
@@ -1536,7 +1543,7 @@ class DocumentationValidator:
                         break
             if not matching_entity:
                 failed.append(
-                    f"unsupported_rate_limit: rate limit of '{r_val}' claimed in documentation, but no rate limit entity exists in source (PAGE_SIZE or other constants do not authorize rate limits)"
+                    f"unsupported_numeric_claim: rate limit of '{r_val}' claimed in documentation, but no rate limit entity exists in source (PAGE_SIZE or other constants do not authorize rate limits)"
                 )
 
         # Retry delay claims: SLEEP must not authorize RETRY_DELAY
@@ -1573,7 +1580,7 @@ class DocumentationValidator:
                             contradicting_val = c_info.value
             if not matching_entity:
                 failed.append(
-                    f"unsupported_retry_delay: retry delay '{rd_val}' claimed in documentation does not match retry delay parameters or constants (SLEEP does not authorize RETRY_DELAY)"
+                    f"unsupported_numeric_claim: retry delay '{rd_val}' claimed in documentation does not match retry delay parameters or constants (SLEEP does not authorize RETRY_DELAY)"
                 )
 
         # Retry count claims
